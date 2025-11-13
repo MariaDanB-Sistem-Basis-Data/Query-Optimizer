@@ -197,6 +197,31 @@ def print_table_statistics():
     print("="*70)
 
 
+def test_get_cost_function():
+    print("\n" + "="*70)
+    print("TEST 6: Fungsi get_cost() - Simple Cost Retrieval")
+    print("="*70)
+    
+    # Query: SELECT * FROM products
+    table_node = QueryTree("TABLE", "products")
+    project_node = QueryTree("PROJECT", "*")
+    project_node.add_child(table_node)
+    
+    query_text = "SELECT * FROM products"
+    parsed_query = ParsedQuery(query=query_text)
+    parsed_query.query_tree = project_node
+    
+    # Test get_cost() function
+    planner = CostPlanner()
+    cost = planner.get_cost(parsed_query)
+    
+    print(f"Query: {query_text}")
+    print(f"Cost (using get_cost()): {cost}")
+    print(f"Type: {type(cost)}")
+    print("\nFungsi get_cost() mengembalikan integer cost langsung!")
+    print("="*70)
+
+
 if __name__ == "__main__":
     print("\n" + "#"*70)
     print("# COST PLANNER - TEST SUITE")
@@ -211,6 +236,7 @@ if __name__ == "__main__":
     test_complex_query()
     test_aggregation_query()
     test_with_limit()
+    test_get_cost_function()
     
     print("\n" + "#"*70)
     print("# SEMUA TEST SELESAI")

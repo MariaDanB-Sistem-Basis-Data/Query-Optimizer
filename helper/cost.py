@@ -7,7 +7,7 @@ class CostPlanner:
         self.BLOCK_SIZE = 4096
         self.PAGE_SIZE = 4096
         
-    def get_blocking_factor(self, table_name: str) -> int:
+    def get_blocking_factor(self, table_name: str) -> int: # Dummy harusnya dari SM (get_stats_table)
         """
         Dummy function untuk mendapatkan blocking factor dari sebuah table.
         Blocking factor = jumlah record per block
@@ -49,7 +49,7 @@ class CostPlanner:
         Estimasi selectivity dari kondisi WHERE/HAVING.
         Returnnya di range 0.0 - 1.0
         """
-        # Dummy estimation based on operator
+        # Dummy estimation based on operator (masih heuristic, tidak benar2 scanning)
         if "=" in condition:
             return 0.1
         elif ">" in condition or "<" in condition:
@@ -139,11 +139,12 @@ class CostPlanner:
         
         Cost = cost(left) + cost(right) + (records_left * blocks_right)
         
-        # TODO: Implementasi join algorithms lain:
+        # TODO: Implementasi join algorithms lain: (kalau ada bonus dari SM dikerjakan)
         # - Hash Join: better untuk large tables
         # - Merge Join: better jika data sudah sorted
         # - Index Nested Loop: jika ada index di right table
         """
+
         left_records = left_cost.get("estimated_records", 1000)
         right_blocks = right_cost.get("blocks_read", 100)
         
@@ -151,7 +152,7 @@ class CostPlanner:
         join_cost = left_records * right_blocks
         total_cost = left_cost.get("cost", 0) + right_cost.get("cost", 0) + join_cost
         
-        # Estimate output records (assume 10% join selectivity)
+        # Estimate output records (asumsi 10% join selectivity)
         output_records = int(left_records * right_cost.get("estimated_records", 1000) * 0.1)
         
         return {
@@ -171,7 +172,7 @@ class CostPlanner:
         Menggunakan external merge sort.
         
         Cost ≈ 2 * blocks * (1 + log_M(blocks))
-        dimana M = jumlah blocks yang fit di memory
+        M = jumlah blocks yang fit di memory
         """
         input_blocks = input_cost.get("blocks_read", 100)
         input_records = input_cost.get("estimated_records", 1000)
@@ -228,7 +229,7 @@ class CostPlanner:
         """
         input_records = input_cost.get("estimated_records", 1000)
         
-        # Assume aggregation creates hash table
+        # Asumsi agregasi ada Hash Table
         # Cost = read all + build hash table
         agg_cost = input_cost.get("cost", 0) * 0.2
         total_cost = input_cost.get("cost", 0) + agg_cost
@@ -304,10 +305,19 @@ class CostPlanner:
                 return self.calculate_cost(node.childs[0])
             return {"cost": 0, "estimated_records": 0}
     
+
+    #================================= MAIN FUNCTION, PANGGIL INI ===============================================
+    def get_cost(self, query: ParsedQuery) -> int:
+        if not query.query_tree:
+            raise ValueError("No query tree available in ParsedQuery")
+        
+        cost_info = self.calculate_cost(query.query_tree)
+        return int(cost_info.get("cost", 0))
+    
+    
     def plan_query(self, parsed_query: ParsedQuery) -> dict:
         """
-        Main entry point untuk cost planning.
-        Returns complete cost breakdown.
+        Kalau cuma mendapatkan cost integer, pake get_cost(). Ini untuk breakdownnya
         """
         if not parsed_query.query_tree:
             return {
