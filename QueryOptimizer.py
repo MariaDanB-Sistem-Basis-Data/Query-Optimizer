@@ -30,7 +30,10 @@ from helper.helper import (
     push_selection_through_join_single,
     push_selection_through_join_split,
     push_projection_through_join_simple,
-    push_projection_through_join_with_join_attrs
+    push_projection_through_join_with_join_attrs,
+    _get_order_by_info,
+    _parse_drop_table,
+    _parse_create_table
 )
 
 from helper.stats import get_stats
@@ -79,8 +82,8 @@ class OptimizationEngine:
                 
                 # 3. Parse ORDER BY
                 if "ORDER BY" in q.upper():
-                    order_col = _get_column_from_order_by(q)
-                    sort = QueryTree(type="SORT", val=order_col)
+                    order_info = _get_order_by_info(q)
+                    sort = QueryTree(type="SORT", val=order_info)
                     
                     if last_node:
                         last_node.add_child(sort)
@@ -255,6 +258,18 @@ class OptimizationEngine:
                 
                 parse_result.query_tree = insert_node
             
+             # Parse DROP TABLE statement
+            elif q.upper().startswith("CREATE"):
+                create_val = _parse_create_table(q)
+                create_node = QueryTree(type="CREATE_TABLE", val=create_val)
+                parse_result.query_tree = create_node
+
+             # Parse DROP TABLE statement
+            elif q.upper().startswith("DROP"):
+                drop_val = _parse_drop_table(q)
+                drop_node = QueryTree(type="DROP_TABLE", val=drop_val)
+                parse_result.query_tree = drop_node
+
             # Parse BEGIN TRANSACTION statement
             elif q.upper().startswith("BEGIN"):
                 # Masih simple node without children
@@ -272,18 +287,9 @@ class OptimizationEngine:
                 # Masih simple node without children
                 rollback_node = QueryTree(type="ROLLBACK", val="")
                 parse_result.query_tree = rollback_node
-            
-            else:
-                supported_but_not_parsed = ["CREATE", "DROP"]
-                q_type = q.split(maxsplit=1)[0].upper()
                 
-                if q_type in supported_but_not_parsed:
-                    raise Exception(f"{q_type} query is valid but parsing not implemented yet (needs storage manager)")
-                else:
-                    raise Exception(f"Unsupported query type: {q[:20]}")
-            
-            # Note: belum implemen untuk statement lain yang butuh koordinasi sama Storage Manager seperti CREATE, DROP, dll + subquery
-            # dan OR di WHERE juga belum diimplemen (masih nanya QnA)
+            else:
+                raise Exception(f"Unsupported query type: {q[:20]}")
         except Exception as e:
             raise Exception(f"Error parsing query: {str(e)}")
         

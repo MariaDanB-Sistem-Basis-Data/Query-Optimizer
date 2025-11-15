@@ -21,7 +21,8 @@ try:
         _extract_table_insert,
         _extract_columns_insert,
         _extract_values_insert,
-        _parse_table_with_alias
+        _parse_table_with_alias,
+        _get_order_by_info
     )
 except ImportError as e:
     print(f"ERROR: Gagal mengimpor modul. Pastikan semua file ada.")
@@ -148,12 +149,18 @@ class TestSelectQueryParsing:
 
     def test_select_with_order_by_asc(self):
         optimizer = OptimizationEngine()
-        query = "SELECT * FROM students ORDER BY age;"
+        query = "SELECT name FROM students ORDER BY name ASC;"
         parsed = optimizer.parse_query(query)
-
-        # Root should be SORT
-        assert parsed.query_tree.type == "SORT"
-        assert parsed.query_tree.val == "age"
+        
+        # Find SORT node
+        current = parsed.query_tree
+        while current and current.type != "SORT":
+            current = current.childs[0] if current.childs else None
+        
+        assert current is not None, "SORT node not found"
+        assert current.type == "SORT"
+        assert "name" in current.val
+        assert "ASC" in current.val
 
     def test_select_with_order_by_desc(self):
         optimizer = OptimizationEngine()
@@ -622,9 +629,21 @@ class TestHelperFunctions:
         assert limit == 1000
 
     def test_get_column_from_order_by(self):
-        query = "SELECT * FROM students ORDER BY age"
-        col = _get_column_from_order_by(query)
-        assert col == "age"
+        # Test function _get_order_by_info instead
+        query1 = "SELECT * FROM students ORDER BY name;"
+        result1 = _get_order_by_info(query1)
+        assert "name" in result1
+        assert "ASC" in result1  # Default ASC
+        
+        query2 = "SELECT * FROM students ORDER BY age DESC;"
+        result2 = _get_order_by_info(query2)
+        assert "age" in result2
+        assert "DESC" in result2
+        
+        query3 = "SELECT * FROM students ORDER BY gpa ASC LIMIT 10;"
+        result3 = _get_order_by_info(query3)
+        assert "gpa" in result3
+        assert "ASC" in result3
 
     def test_get_column_from_order_by_asc(self):
         query = "SELECT * FROM students ORDER BY age ASC"
@@ -748,11 +767,12 @@ class TestErrorHandling:
 
     def test_unsupported_query_create(self):
         optimizer = OptimizationEngine()
+        query = "GRANT SELECT ON students TO user1;"
         try:
-            optimizer.parse_query("CREATE TABLE students (id INTEGER);")
-            assert False, "Harusnya memunculkan error"
-        except Exception as exc_info:
-            assert "not implemented" in str(exc_info).lower() or "storage manager" in str(exc_info).lower()
+            parsed = optimizer.parse_query(query)
+            assert False, "Should have raised exception for unsupported query"
+        except Exception as e:
+            assert "Unsupported query type" in str(e) or "Query validation failed" in str(e)
 
     def post_unsupported_query_drop(self):
         optimizer = OptimizationEngine()
@@ -902,6 +922,339 @@ class TestEdgeCases:
         parsed = optimizer.parse_query(query)
         assert "students.name" in parsed.query_tree.val
 
+#  TEST CLASSES 
+
+class TestOrderByParsing:
+    def test_select_order_by_default_asc(self):
+        optimizer = OptimizationEngine()
+        query = "SELECT name, age FROM students ORDER BY age;"
+        parsed = optimizer.parse_query(query)
+        
+        # PROJECT -> SORT -> TABLE
+        assert parsed.query_tree.type == "PROJECT"
+        sort = parsed.query_tree.childs[0]
+        assert sort.type == "SORT"
+        assert sort.val == "age ASC"  # Default ASC
+        table = sort.childs[0]
+        assert table.type == "TABLE"
+
+    def test_select_order_by_desc(self):
+        optimizer = OptimizationEngine()
+        query = "SELECT name, salary FROM employees ORDER BY salary DESC;"
+        parsed = optimizer.parse_query(query)
+        
+        # Find SORT node
+        current = parsed.query_tree
+        while current and current.type != "SORT":
+            current = current.childs[0] if current.childs else None
+        
+        assert current is not None
+        assert current.type == "SORT"
+        assert "DESC" in current.val
+        assert "salary" in current.val
+
+    def test_select_order_by_asc_explicit(self):
+        optimizer = OptimizationEngine()
+        query = "SELECT name FROM students ORDER BY name ASC;"
+        parsed = optimizer.parse_query(query)
+        
+        # Find SORT node
+        current = parsed.query_tree
+        while current and current.type != "SORT":
+            current = current.childs[0] if current.childs else None
+        
+        assert current is not None
+        assert current.type == "SORT"
+        assert "ASC" in current.val
+        assert "name" in current.val
+
+    def test_select_order_by_with_table_prefix(self):
+        optimizer = OptimizationEngine()
+        query = "SELECT m.title FROM movie AS m ORDER BY m.rating DESC;"
+        parsed = optimizer.parse_query(query)
+        
+        # Find SORT node
+        current = parsed.query_tree
+        while current and current.type != "SORT":
+            current = current.childs[0] if current.childs else None
+        
+        assert current is not None
+        assert current.type == "SORT"
+        assert "m.rating" in current.val
+        assert "DESC" in current.val
+
+    def test_select_order_by_with_where_and_limit(self):
+        optimizer = OptimizationEngine()
+        query = "SELECT name FROM students WHERE age > 18 ORDER BY name ASC LIMIT 10;"
+        parsed = optimizer.parse_query(query)
+        
+        # PROJECT -> LIMIT -> SORT -> SIGMA -> TABLE
+        assert parsed.query_tree.type == "PROJECT"
+        limit = parsed.query_tree.childs[0]
+        assert limit.type == "LIMIT"
+        sort = limit.childs[0]
+        assert sort.type == "SORT"
+        assert "name" in sort.val
+        assert "ASC" in sort.val
+        sigma = sort.childs[0]
+        assert sigma.type == "SIGMA"
+
+
+class TestDeleteQueryParsing:
+    def test_delete_without_where(self):
+        optimizer = OptimizationEngine()
+        query = "DELETE FROM students;"
+        parsed = optimizer.parse_query(query)
+        
+        # DELETE -> TABLE
+        assert parsed.query_tree.type == "DELETE"
+        assert parsed.query_tree.val == ""
+        table = parsed.query_tree.childs[0]
+        assert table.type == "TABLE"
+        assert table.val == "students"
+
+    def test_delete_with_where_single_condition(self):
+        optimizer = OptimizationEngine()
+        query = "DELETE FROM employees WHERE department = 'RnD';"
+        parsed = optimizer.parse_query(query)
+        
+        # DELETE -> SIGMA -> TABLE
+        assert parsed.query_tree.type == "DELETE"
+        sigma = parsed.query_tree.childs[0]
+        assert sigma.type == "SIGMA"
+        assert "department" in sigma.val
+        assert "RnD" in sigma.val
+        table = sigma.childs[0]
+        assert table.type == "TABLE"
+        assert table.val == "employees"
+
+    def test_delete_with_where_multiple_conditions(self):
+        optimizer = OptimizationEngine()
+        query = "DELETE FROM students WHERE age > 25 AND gpa < 2.0;"
+        parsed = optimizer.parse_query(query)
+        
+        # DELETE -> SIGMA -> SIGMA -> TABLE
+        assert parsed.query_tree.type == "DELETE"
+        sigma1 = parsed.query_tree.childs[0]
+        assert sigma1.type == "SIGMA"
+        assert "age > 25" in sigma1.val
+        sigma2 = sigma1.childs[0]
+        assert sigma2.type == "SIGMA"
+        assert "gpa < 2.0" in sigma2.val
+        table = sigma2.childs[0]
+        assert table.type == "TABLE"
+
+    def test_delete_with_numeric_condition(self):
+        optimizer = OptimizationEngine()
+        query = "DELETE FROM products WHERE price <= 10.50;"
+        parsed = optimizer.parse_query(query)
+        
+        # DELETE -> SIGMA -> TABLE
+        assert parsed.query_tree.type == "DELETE"
+        sigma = parsed.query_tree.childs[0]
+        assert sigma.type == "SIGMA"
+        assert "price" in sigma.val
+        assert "10.50" in sigma.val
+
+
+class TestInsertQueryParsing:
+    def test_insert_basic(self):
+        optimizer = OptimizationEngine()
+        query = "INSERT INTO students (id, name, age) VALUES (1, 'Alice', 20);"
+        parsed = optimizer.parse_query(query)
+        
+        # Single INSERT node
+        assert parsed.query_tree.type == "INSERT"
+        assert "students" in parsed.query_tree.val
+        assert "(id, name, age)" in parsed.query_tree.val
+        assert "(1, 'Alice', 20)" in parsed.query_tree.val
+        
+        # Check format: "table|(cols)|(vals)"
+        parts = parsed.query_tree.val.split("|")
+        assert len(parts) == 3
+        assert parts[0] == "students"
+
+    def test_insert_with_string_values(self):
+        optimizer = OptimizationEngine()
+        query = "INSERT INTO employees (name, department, salary) VALUES ('Bob', 'Engineering', 75000);"
+        parsed = optimizer.parse_query(query)
+        
+        assert parsed.query_tree.type == "INSERT"
+        assert "employees" in parsed.query_tree.val
+        assert "Bob" in parsed.query_tree.val
+        assert "Engineering" in parsed.query_tree.val
+        assert "75000" in parsed.query_tree.val
+
+    def test_insert_with_numeric_values(self):
+        optimizer = OptimizationEngine()
+        query = "INSERT INTO products (id, price, quantity) VALUES (100, 29.99, 50);"
+        parsed = optimizer.parse_query(query)
+        
+        assert parsed.query_tree.type == "INSERT"
+        assert "products" in parsed.query_tree.val
+        assert "100" in parsed.query_tree.val
+        assert "29.99" in parsed.query_tree.val
+        assert "50" in parsed.query_tree.val
+
+    def test_insert_single_column(self):
+        optimizer = OptimizationEngine()
+        query = "INSERT INTO logs (message) VALUES ('System started');"
+        parsed = optimizer.parse_query(query)
+        
+        assert parsed.query_tree.type == "INSERT"
+        assert "logs" in parsed.query_tree.val
+        assert "(message)" in parsed.query_tree.val
+        assert "System started" in parsed.query_tree.val
+
+
+class TestCreateTableParsing:
+    def test_create_table_basic(self):
+        optimizer = OptimizationEngine()
+        query = "CREATE TABLE students (id int, name varchar(100), age int);"
+        parsed = optimizer.parse_query(query)
+        
+        # Single CREATE_TABLE node
+        assert parsed.query_tree.type == "CREATE_TABLE"
+        
+        # Check format: "table|columns|pks|fks"
+        val = parsed.query_tree.val
+        parts = val.split("|")
+        assert len(parts) == 4
+        assert parts[0] == "students"
+        assert "id:int:" in parts[1]
+        assert "name:varchar:100" in parts[1]
+        assert "age:int:" in parts[1]
+
+    def test_create_table_with_primary_key(self):
+        optimizer = OptimizationEngine()
+        query = "CREATE TABLE students (id int, name varchar(100), PRIMARY KEY(id));"
+        parsed = optimizer.parse_query(query)
+        
+        assert parsed.query_tree.type == "CREATE_TABLE"
+        val = parsed.query_tree.val
+        parts = val.split("|")
+        
+        # Check table name
+        assert parts[0] == "students"
+        
+        # Check columns
+        assert "id:int:" in parts[1]
+        assert "name:varchar:100" in parts[1]
+        
+        # Check primary key
+        assert parts[2] == "id"
+
+    def test_create_table_with_foreign_key(self):
+        optimizer = OptimizationEngine()
+        query = "CREATE TABLE enrollment (student_id int, course_id int, FOREIGN KEY(student_id) REFERENCES students(id));"
+        parsed = optimizer.parse_query(query)
+        
+        assert parsed.query_tree.type == "CREATE_TABLE"
+        val = parsed.query_tree.val
+        parts = val.split("|")
+        
+        # Check table name
+        assert parts[0] == "enrollment"
+        
+        # Check foreign key format: "fk_col:ref_table:ref_col"
+        assert "student_id:students:id" in parts[3]
+
+    def test_create_table_with_multiple_columns(self):
+        optimizer = OptimizationEngine()
+        query = "CREATE TABLE employees (id int, name varchar(50), department varchar(30), salary float, hire_date char(10));"
+        parsed = optimizer.parse_query(query)
+        
+        assert parsed.query_tree.type == "CREATE_TABLE"
+        val = parsed.query_tree.val
+        parts = val.split("|")
+        
+        assert parts[0] == "employees"
+        assert "id:int:" in parts[1]
+        assert "name:varchar:50" in parts[1]
+        assert "department:varchar:30" in parts[1]
+        assert "salary:float:" in parts[1]
+        assert "hire_date:char:10" in parts[1]
+
+    def test_create_table_with_composite_primary_key(self):
+        optimizer = OptimizationEngine()
+        query = "CREATE TABLE enrollment (student_id int, course_id int, PRIMARY KEY(student_id, course_id));"
+        parsed = optimizer.parse_query(query)
+        
+        assert parsed.query_tree.type == "CREATE_TABLE"
+        val = parsed.query_tree.val
+        parts = val.split("|")
+        
+        # Check composite primary key
+        assert "student_id" in parts[2]
+        assert "course_id" in parts[2]
+
+    def test_create_table_complex(self):
+        optimizer = OptimizationEngine()
+        # Jadikan single line
+        query = "CREATE TABLE orders (order_id int, customer_id int, total float, PRIMARY KEY(order_id), FOREIGN KEY(customer_id) REFERENCES customers(id));"
+        parsed = optimizer.parse_query(query)
+        
+        assert parsed.query_tree.type == "CREATE_TABLE"
+        val = parsed.query_tree.val
+        parts = val.split("|")
+        
+        assert parts[0] == "orders"
+        assert "order_id:int:" in parts[1]
+        assert parts[2] == "order_id"  # Primary key
+        assert "customer_id:customers:id" in parts[3]  # Foreign key 
+
+class TestDropTableParsing:
+    def test_drop_table_default_restrict(self):
+        optimizer = OptimizationEngine()
+        query = "DROP TABLE students;"
+        parsed = optimizer.parse_query(query)
+        
+        # Single DROP_TABLE node
+        assert parsed.query_tree.type == "DROP_TABLE"
+        
+        # Check format: "table|mode"
+        val = parsed.query_tree.val
+        parts = val.split("|")
+        assert len(parts) == 2
+        assert parts[0] == "students"
+        assert parts[1] == "RESTRICT"  # Default mode
+
+    def test_drop_table_cascade(self):
+        optimizer = OptimizationEngine()
+        query = "DROP TABLE departments CASCADE;"
+        parsed = optimizer.parse_query(query)
+        
+        assert parsed.query_tree.type == "DROP_TABLE"
+        val = parsed.query_tree.val
+        parts = val.split("|")
+        
+        assert parts[0] == "departments"
+        assert parts[1] == "CASCADE"
+
+    def test_drop_table_restrict_explicit(self):
+        optimizer = OptimizationEngine()
+        query = "DROP TABLE employees RESTRICT;"
+        parsed = optimizer.parse_query(query)
+        
+        assert parsed.query_tree.type == "DROP_TABLE"
+        val = parsed.query_tree.val
+        parts = val.split("|")
+        
+        assert parts[0] == "employees"
+        assert parts[1] == "RESTRICT"
+
+    def test_drop_table_case_insensitive(self):
+        optimizer = OptimizationEngine()
+        query = "drop table Products cascade;"
+        parsed = optimizer.parse_query(query)
+        
+        assert parsed.query_tree.type == "DROP_TABLE"
+        val = parsed.query_tree.val
+        assert "Products" in val or "products" in val
+        assert "CASCADE" in val
+
+
+#  TEST RUNNER 
 
 if __name__ == "__main__":
     tests_to_run = []
@@ -910,23 +1263,27 @@ if __name__ == "__main__":
     test_classes = [
         TestSelectQueryParsing,
         TestUpdateQueryParsing,
-        TestDeleteQueryParsing,
-        TestInsertQueryParsing,
+        TestDeleteQueryParsing,         
+        TestInsertQueryParsing,       
         TestTransactionQueryParsing,
         TestHelperFunctions,
         TestErrorHandling,
         TestComplexQueries,
-        TestEdgeCases
+        TestEdgeCases,
+        TestOrderByParsing,           
+        TestCreateTableParsing,        
+        TestDropTableParsing,          
     ]
-
+    
     for test_class in test_classes:
         instance = test_class()
-        methods = [getattr(instance, func) for func in dir(test_class) if callable(getattr(instance, func)) and func.startswith("test_")]
+        methods = [getattr(instance, func) for func in dir(test_class) 
+                   if callable(getattr(instance, func)) and func.startswith("test_")]
         tests_to_run.extend(methods)
-
+    
     passed_count = 0
     failed_count = 0
-
+    
     for test_func in tests_to_run:
         test_name = test_func.__name__
         try:
@@ -939,7 +1296,7 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"ERROR: {test_name}\n  Unexpected error: {type(e).__name__}: {e}")
             failed_count += 1
-
+    
     print("\n" + "="*40)
     print("Ringkasan Tes")
     print("="*40)
@@ -947,7 +1304,7 @@ if __name__ == "__main__":
     print(f"Lulus     : {passed_count}")
     print(f"Gagal     : {failed_count}")
     print("="*40)
-
+    
     if failed_count > 0:
         sys.exit(1)
     else:

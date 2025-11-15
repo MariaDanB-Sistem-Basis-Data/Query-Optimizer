@@ -583,10 +583,10 @@ def validate_query(query: str) -> tuple:
         ),
         "CREATE": re.compile(
             r'^\s*CREATE\s+TABLE\s+\w+\s*\(.+?\)\s*;$',
-            re.IGNORECASE
+            re.IGNORECASE | re.DOTALL
         ),
         "DROP": re.compile(
-            r'^\s*DROP\s+TABLE\s+\w+\s*;$',
+            r'^\s*DROP\s+TABLE\s+\w+\s*(CASCADE|RESTRICT)?\s*;$',
             re.IGNORECASE
         ),
         "BEGIN": re.compile(
@@ -707,7 +707,7 @@ def _get_limit(query: str) -> int:
     limit_str = query[limit_idx:].strip().split()[0]
     return int(limit_str)
 
-def _get_column_from_order_by(query: str) -> str:
+def _get_info_from_order_by(query: str) -> str: # new: ASC and DESC
     q_upper = query.upper()
     order_idx = q_upper.find("ORDER BY") + 8
     
@@ -721,7 +721,16 @@ def _get_column_from_order_by(query: str) -> str:
             end_idx = idx
             break
     
-    return query[order_idx:end_idx].strip()
+    order_clause = query[order_idx:end_idx].strip()
+    
+    # Check for DESC/ASC
+    if "DESC" in order_clause.upper():
+        return order_clause
+    elif "ASC" in order_clause.upper():
+        return order_clause
+    else:
+        # Default to ASC
+        return f"{order_clause} ASC"
 
 def _get_column_from_group_by(query: str) -> str:
     q_upper = query.upper()
@@ -890,3 +899,154 @@ def _extract_values_insert(query: str) -> str:
     
     values = query[start_idx:end_idx+1]  # Include parentheses
     return values
+
+def _get_column_from_order_by(query: str) -> str:
+    q_upper = query.upper()
+    order_idx = q_upper.find("ORDER BY") + 8
+    
+    end_keywords = ["LIMIT"]
+    end_idx = len(query)
+    
+    for keyword in end_keywords:
+        idx = q_upper.find(keyword, order_idx)
+        if idx != -1:
+            end_idx = idx
+            break
+    
+    order_clause = query[order_idx:end_idx].strip()
+    
+    # Default ASC jika tidak disebutkan
+    if "DESC" in order_clause.upper():
+        return order_clause  # e.g., "salary DESC"
+    elif "ASC" in order_clause.upper():
+        return order_clause  # e.g., "salary ASC"
+    else:
+        return f"{order_clause} ASC"  # default
+
+def _get_order_by_info(query: str) -> str:
+    q_upper = query.upper()
+    order_idx = q_upper.find("ORDER BY") + 8
+    
+    # Find next keyword
+    end_keywords = ["LIMIT"]
+    end_idx = len(query)
+    
+    for keyword in end_keywords:
+        idx = q_upper.find(keyword, order_idx)
+        if idx != -1:
+            end_idx = idx
+            break
+    
+    order_clause = query[order_idx:end_idx].strip()
+    
+    # Check for DESC/ASC
+    if "DESC" in order_clause.upper():
+        return order_clause
+    elif "ASC" in order_clause.upper():
+        return order_clause
+    else:
+        # Default to ASC
+        return f"{order_clause} ASC"
+    
+def _parse_drop_table(query: str) -> str:
+    q_upper = query.upper()
+    
+    drop_idx = q_upper.find("DROP TABLE") + 10
+    table_part = query[drop_idx:].strip().rstrip(';').strip()
+    
+    # Check for CASCADE or RESTRICT
+    mode = "RESTRICT"  # default
+    
+    if "CASCADE" in table_part.upper():
+        mode = "CASCADE"
+        table_name = table_part[:table_part.upper().find("CASCADE")].strip()
+    elif "RESTRICT" in table_part.upper():
+        mode = "RESTRICT"
+        table_name = table_part[:table_part.upper().find("RESTRICT")].strip()
+    else:
+        table_name = table_part
+    
+    return f"{table_name}|{mode}"
+
+def _parse_create_table(query: str) -> str:
+    q_upper = query.upper()
+    
+    # Extract table name
+    create_idx = q_upper.find("CREATE TABLE") + 12
+    paren_idx = query.find("(", create_idx)
+    table_name = query[create_idx:paren_idx].strip()
+    
+    # Extract content inside parentheses
+    content_start = paren_idx + 1
+    content_end = query.rfind(")")
+    content = query[content_start:content_end].strip()
+    
+    # Split by comma (careful with nested parens)
+    parts = []
+    current_part = ""
+    paren_depth = 0
+    
+    for char in content:
+        if char == '(':
+            paren_depth += 1
+            current_part += char
+        elif char == ')':
+            paren_depth -= 1
+            current_part += char
+        elif char == ',' and paren_depth == 0:
+            parts.append(current_part.strip())
+            current_part = ""
+        else:
+            current_part += char
+    
+    if current_part.strip():
+        parts.append(current_part.strip())
+    
+    # Parse each part
+    columns = []
+    primary_key = []
+    foreign_keys = []
+    
+    for part in parts:
+        part_upper = part.upper()
+        
+        if part_upper.startswith("PRIMARY KEY"):
+            # Extract column(s): PRIMARY KEY(col1, col2)
+            pk_content = part[part.find("(")+1:part.find(")")].strip()
+            primary_key = [c.strip() for c in pk_content.split(",")]
+        
+        elif part_upper.startswith("FOREIGN KEY"):
+            # FOREIGN KEY(col) REFERENCES table(ref_col)
+            fk_match = re.match(
+                r'FOREIGN\s+KEY\s*\((\w+)\)\s+REFERENCES\s+(\w+)\s*\((\w+)\)',
+                part,
+                re.IGNORECASE
+            )
+            if fk_match:
+                foreign_keys.append(
+                    f"{fk_match.group(1)}:{fk_match.group(2)}:{fk_match.group(3)}"
+                )
+        
+        else:
+            # Regular column: col_name type [size]
+            tokens = part.split()
+            if len(tokens) >= 2:
+                col_name = tokens[0]
+                col_type = tokens[1].lower()
+                
+                # Extract size: CHAR(10) or VARCHAR(255)
+                size = ""
+                if "(" in col_type:
+                    type_match = re.match(r'(\w+)\((\d+)\)', col_type)
+                    if type_match:
+                        col_type = type_match.group(1)
+                        size = type_match.group(2)
+                
+                columns.append(f"{col_name}:{col_type}:{size}")
+    
+    # Build result
+    columns_str = ",".join(columns)
+    pks_str = ",".join(primary_key)
+    fks_str = ",".join(foreign_keys)
+    
+    return f"{table_name}|{columns_str}|{pks_str}|{fks_str}"
