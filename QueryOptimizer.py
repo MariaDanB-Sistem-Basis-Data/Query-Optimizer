@@ -33,7 +33,15 @@ from helper.helper import (
     push_projection_through_join_with_join_attrs,
     _get_order_by_info,
     _parse_drop_table,
-    _parse_create_table
+    _parse_create_table,
+    parse_where_condition,
+    parse_columns_from_string,
+    parse_order_by_string,
+    parse_group_by_string,
+    parse_table_with_alias,
+    parse_set_clauses_string,
+    parse_insert_columns_string,
+    parse_insert_values_string
 )
 
 from helper.stats import get_stats
@@ -41,7 +49,6 @@ from helper.stats import get_stats
 class OptimizationEngine:
     
     def parse_query(self, query: str) -> ParsedQuery:
-
         if not query:
             raise Exception("Query is empty")
         
@@ -58,21 +65,26 @@ class OptimizationEngine:
         try:
             # Parse SELECT statement
             if q.upper().startswith("SELECT"):
-                # Init nodes
                 current_root = None
                 last_node = None
                 
                 # 1. Parse PROJECT (SELECT columns)
-                columns = _get_columns_from_select(q)
-                if columns != "*":  # only create PROJECT node if not selecting all columns
-                    proj = QueryTree(type="PROJECT", val=columns)
+                columns_str = _get_columns_from_select(q)
+                if columns_str != "*":
+                    columns_list = parse_columns_from_string(columns_str)
+                    
+                    proj = QueryTree(type="PROJECT", val=columns_str)
+                    proj.columns = columns_list  # Structured data
+                    
                     current_root = proj
                     last_node = proj
                 
                 # 2. Parse LIMIT
                 if "LIMIT" in q.upper():
                     limit_val = _get_limit(q)
+                    
                     lim = QueryTree(type="LIMIT", val=str(limit_val))
+                    lim.limit_value = int(limit_val)  # Structured data
                     
                     if last_node:
                         last_node.add_child(lim)
@@ -82,8 +94,11 @@ class OptimizationEngine:
                 
                 # 3. Parse ORDER BY
                 if "ORDER BY" in q.upper():
-                    order_info = _get_order_by_info(q)
-                    sort = QueryTree(type="SORT", val=order_info)
+                    order_info_str = _get_order_by_info(q)
+                    order_by_list = parse_order_by_string(order_info_str)
+                    
+                    sort = QueryTree(type="SORT", val=order_info_str)
+                    sort.order_by = order_by_list  # Structured data
                     
                     if last_node:
                         last_node.add_child(sort)
@@ -93,8 +108,11 @@ class OptimizationEngine:
                 
                 # 4. Parse GROUP BY
                 if "GROUP BY" in q.upper():
-                    group_col = _get_column_from_group_by(q)
-                    group = QueryTree(type="GROUP", val=group_col)
+                    group_col_str = _get_column_from_group_by(q)
+                    group_by_list = parse_group_by_string(group_col_str)
+                    
+                    group = QueryTree(type="GROUP", val=group_col_str)
+                    group.group_by = group_by_list  # Structured data
                     
                     if last_node:
                         last_node.add_child(group)
@@ -102,194 +120,172 @@ class OptimizationEngine:
                         current_root = group
                     last_node = group
                 
-                # 5. Parse WHERE (SIGMA)
+                # 5. Parse WHERE (SIGMA), udah support mixed and & or
                 if "WHERE" in q.upper():
-                    where_cond = _get_condition_from_where(q)
+                    where_cond_str = _get_condition_from_where(q)
+                    condition_dict = parse_where_condition(where_cond_str)
                     
-                    has_and = " AND " in where_cond.upper()
-                    has_or = " OR " in where_cond.upper()
+                    sigma = QueryTree(type="SIGMA", val=where_cond_str)
+                    sigma.condition = condition_dict  # Structured data
                     
-                    # Case 1: Mixed (still not supported)
-                    if has_and and has_or:
-                        raise Exception("Mixed AND/OR clauses are not supported")
-                    
-                    # Case 2: OR-only
-                    elif has_or:
-                        or_node = QueryTree(type="OR")
-                        if last_node:
-                            last_node.add_child(or_node)
-                        else:
-                            current_root = or_node
-                        
-                        or_conditions = where_cond.split(" OR ")
-
-                        for cond in or_conditions:
-                            sigma_node = QueryTree(type="SIGMA", val=cond.strip())
-                            or_node.add_child(sigma_node)
-                        
-                        last_node = or_node
-
-                    # Case 3: AND-only (atau kondisi tunggal)
-                    elif has_and or (not has_and and not has_or and where_cond):
-                        where_split = where_cond.split(" AND ")
-                        
-                        first_sigma = QueryTree(type="SIGMA", val=where_split[0].strip())
-                        
-                        if last_node:
-                            last_node.add_child(first_sigma)
-                        else:
-                            current_root = first_sigma
-                        
-                        temp_sigma = first_sigma
-                        for cond in where_split[1:]:
-                            next_sigma = QueryTree(type="SIGMA", val=cond.strip())
-                            temp_sigma.add_child(next_sigma)
-                            temp_sigma = next_sigma
-                        
-                        last_node = temp_sigma
-                        
-                # 6. Parse FROM (TABLE/JOIN with AS support)
-                if last_node:
-                    if last_node.type == "OR":
-                        for child in last_node.childs:
-                            if child.type == "SIGMA":
-                                from_node_new = _parse_from_clause(q)
-                                child.add_child(from_node_new)
-                    
+                    if last_node:
+                        last_node.add_child(sigma)
                     else:
-                        from_node = _parse_from_clause(q)
-                        last_node.add_child(from_node)
+                        current_root = sigma
+                    last_node = sigma
                 
+                # 6. Parse FROM
+                if last_node:
+                    from_node = _parse_from_clause(q)
+                    last_node.add_child(from_node)
                 else:
                     from_node = _parse_from_clause(q)
                     current_root = from_node
                 
                 parse_result.query_tree = current_root
-            
+          
             # Parse UPDATE statement
             elif q.upper().startswith("UPDATE"):
-                # Init nodes
                 current_root = None
                 last_node = None
                 
-                # 1. Parse SET conditions 
-                set_conditions = _extract_set_conditions(q)
+                # 1. Parse SET 
+                set_conditions_list = _extract_set_conditions(q)
                 
-                for set_cond in set_conditions:
-                    update_node = QueryTree(type="UPDATE", val=set_cond)
-                    
-                    if last_node:
-                        last_node.add_child(update_node)
-                    else:
-                        current_root = update_node
-                    last_node = update_node
+                set_dict = {}
+                for set_cond in set_conditions_list:
+                    if '=' in set_cond:
+                        eq_pos = set_cond.find('=')
+                        column = set_cond[:eq_pos].strip()
+                        value = set_cond[eq_pos + 1:].strip()
+                        set_dict[column] = value
                 
-                # 2. Parse WHERE conditions (optional)
+                set_conditions_str = ", ".join(set_conditions_list)
+                
+                update_node = QueryTree(type="UPDATE", val=set_conditions_str)
+                update_node.set_clauses = set_dict  # Structured data
+                
+                current_root = update_node
+                last_node = update_node
+                
+                # 2. Parse WHERE (optional)
                 if "WHERE" in q.upper():
-                    where_cond = _get_condition_from_where(q)
-                    where_split = where_cond.split(" AND ")
+                    where_cond_str = _get_condition_from_where(q)
+                    condition_dict = parse_where_condition(where_cond_str)
                     
-                    # Create first SIGMA node
-                    first_sigma = QueryTree(type="SIGMA", val=where_split[0].strip())
-                    last_node.add_child(first_sigma)
+                    sigma = QueryTree(type="SIGMA", val=where_cond_str)
+                    sigma.condition = condition_dict  # Structured data
                     
-                    # Chain additional SIGMA nodes
-                    temp_sigma = first_sigma
-                    for cond in where_split[1:]:
-                        next_sigma = QueryTree(type="SIGMA", val=cond.strip())
-                        temp_sigma.add_child(next_sigma)
-                        temp_sigma = next_sigma
-                    
-                    last_node = temp_sigma
+                    last_node.add_child(sigma)
+                    last_node = sigma
                 
-                # 3. Parse table name
-                table_name = _extract_table_update(q)
-                table_node = QueryTree(type="TABLE", val=table_name)
+                # 3. Parse table name (support alias)
+                table_str = _extract_table_update(q)
+                table_name, table_alias = parse_table_with_alias(table_str)
+                
+                table_node = QueryTree(type="TABLE", val=table_str)
+                table_node.table_name = table_name      # Structured data
+                table_node.table_alias = table_alias    # Structured data
+                
                 last_node.add_child(table_node)
                 
                 parse_result.query_tree = current_root
-            
+
             # Parse DELETE statement
             elif q.upper().startswith("DELETE"):
-                # Init nodes
                 current_root = None
                 last_node = None
                 
-                # 1. Create DELETE node
+                # 1. DELETE node
                 delete_node = QueryTree(type="DELETE", val="")
                 current_root = delete_node
                 last_node = delete_node
                 
-                # 2. Parse WHERE conditions (optional)
+                # 2. Parse WHERE
                 if "WHERE" in q.upper():
-                    where_cond = _get_condition_from_where(q)
-                    where_split = where_cond.split(" AND ")
+                    where_cond_str = _get_condition_from_where(q)
+                    condition_dict = parse_where_condition(where_cond_str)
                     
-                    # Create first SIGMA node
-                    first_sigma = QueryTree(type="SIGMA", val=where_split[0].strip())
-                    last_node.add_child(first_sigma)
+                    sigma = QueryTree(type="SIGMA", val=where_cond_str)
+                    sigma.condition = condition_dict  # Structured data
                     
-                    # Chain additional SIGMA nodes
-                    temp_sigma = first_sigma
-                    for cond in where_split[1:]:
-                        next_sigma = QueryTree(type="SIGMA", val=cond.strip())
-                        temp_sigma.add_child(next_sigma)
-                        temp_sigma = next_sigma
-                    
-                    last_node = temp_sigma
+                    last_node.add_child(sigma)
+                    last_node = sigma
                 
-                # 3. Parse table name
-                table_name = _extract_table_delete(q)
-                table_node = QueryTree(type="TABLE", val=table_name)
+                # 3. Parse table
+                table_str = _extract_table_delete(q)
+                table_name, table_alias = parse_table_with_alias(table_str)
+                
+                table_node = QueryTree(type="TABLE", val=table_str)
+                table_node.table_name = table_name      # Structured data
+                table_node.table_alias = table_alias    # Structured data
+                
                 last_node.add_child(table_node)
-                
                 parse_result.query_tree = current_root
             
             # Parse INSERT statement
             elif q.upper().startswith("INSERT"):
-                # Parse components
                 table_name = _extract_table_insert(q)
-                columns = _extract_columns_insert(q)
-                values = _extract_values_insert(q)
+                columns_str = _extract_columns_insert(q)
+                values_str = _extract_values_insert(q)
                 
-                # Create INSERT node with format: "table_name|columns|values"
-                insert_val = f"{table_name}|{columns}|{values}"
+                columns_list = parse_insert_columns_string(columns_str)
+                values_list = parse_insert_values_string(values_str)
+                
+                insert_val = f"{table_name}|{columns_str}|{values_str}"
                 insert_node = QueryTree(type="INSERT", val=insert_val)
+                
+                # Structured data
+                insert_node.insert_table = table_name
+                insert_node.insert_columns = columns_list
+                insert_node.insert_values = values_list
                 
                 parse_result.query_tree = insert_node
             
-             # Parse DROP TABLE statement
+            # Parse CREATE TABLE statement
             elif q.upper().startswith("CREATE"):
                 create_val = _parse_create_table(q)
                 create_node = QueryTree(type="CREATE_TABLE", val=create_val)
+                
+                # Extract table name if possible
+                if '|' in create_val:
+                    parts = create_val.split('|')
+                    if len(parts) >= 1:
+                        create_node.create_table_name = parts[0]
+                
                 parse_result.query_tree = create_node
 
-             # Parse DROP TABLE statement
+            # Parse DROP TABLE statement
             elif q.upper().startswith("DROP"):
-                drop_val = _parse_drop_table(q)
-                drop_node = QueryTree(type="DROP_TABLE", val=drop_val)
+                drop_str = _parse_drop_table(q)
+                is_cascade = "CASCADE" in q.upper()
+                table_name = drop_str.replace("CASCADE", "").replace("cascade", "").strip()
+                
+                drop_node = QueryTree(type="DROP_TABLE", val=drop_str)
+                drop_node.drop_table_name = table_name  # Structured data
+                drop_node.drop_cascade = is_cascade     # Structured data
+                
                 parse_result.query_tree = drop_node
 
             # Parse BEGIN TRANSACTION statement
             elif q.upper().startswith("BEGIN"):
-                # Masih simple node without children
                 begin_node = QueryTree(type="BEGIN_TRANSACTION", val="")
                 parse_result.query_tree = begin_node
             
             # Parse COMMIT statement
             elif q.upper().startswith("COMMIT"):
-                # Masih simple node without children
                 commit_node = QueryTree(type="COMMIT", val="")
                 parse_result.query_tree = commit_node
             
             # Parse ROLLBACK statement
             elif q.upper().startswith("ROLLBACK"):
-                # Masih simple node without children
                 rollback_node = QueryTree(type="ROLLBACK", val="")
                 parse_result.query_tree = rollback_node
-                
+            
+            # Unsupported query type
             else:
                 raise Exception(f"Unsupported query type: {q[:20]}")
+                
         except Exception as e:
             raise Exception(f"Error parsing query: {str(e)}")
         
