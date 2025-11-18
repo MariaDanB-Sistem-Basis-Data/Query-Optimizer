@@ -75,6 +75,50 @@ class ForeignKeyDefinition:
         return f"FK({self.column} -> {self.ref_table}.{self.ref_column})"
 
 
+# insert data - represents INSERT statement data
+class InsertData:
+    def __init__(self, table, columns, values):
+        self.table = table        # str
+        self.columns = columns    # list[str]
+        self.values = values      # list[any]
+    
+    def __repr__(self):
+        cols = ", ".join(self.columns)
+        vals = ", ".join(str(v) if not isinstance(v, str) else f"'{v}'" for v in self.values)
+        return f"{self.table}({cols}) <- ({vals})"
+
+
+# create table data - represents CREATE TABLE statement data
+class CreateTableData:
+    def __init__(self, table, columns, primary_key, foreign_keys):
+        self.table = table              # str
+        self.columns = columns          # list[ColumnDefinition]
+        self.primary_key = primary_key  # list[str]
+        self.foreign_keys = foreign_keys # list[ForeignKeyDefinition]
+    
+    def __repr__(self):
+        cols_str = ", ".join(str(c) for c in self.columns)
+        pk_str = ", ".join(self.primary_key) if self.primary_key else ""
+        result = f"{self.table} [{cols_str}]"
+        if pk_str:
+            result += f" PK({pk_str})"
+        if self.foreign_keys:
+            fk_str = ", ".join(str(fk) for fk in self.foreign_keys)
+            result += f" {fk_str}"
+        return result
+
+
+# drop table data - represents DROP TABLE statement data
+class DropTableData:
+    def __init__(self, table, cascade):
+        self.table = table      # str
+        self.cascade = cascade  # bool
+    
+    def __repr__(self):
+        mode = "CASCADE" if self.cascade else "RESTRICT"
+        return f"{self.table} {mode}"
+
+
 # table reference - represents a table with optional alias
 class TableReference:
     def __init__(self, name, alias=None):

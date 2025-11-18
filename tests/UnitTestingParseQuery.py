@@ -1,6 +1,7 @@
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from QueryOptimizer import OptimizationEngine
 from model.query_tree import (
     QueryTree,
@@ -11,7 +12,10 @@ from model.query_tree import (
     TableReference,
     SetClause,
     ColumnDefinition,
-    ForeignKeyDefinition
+    ForeignKeyDefinition,
+    InsertData,
+    CreateTableData,
+    DropTableData
 )
 
 def print_tree(node, indent=0, prefix="ROOT", is_last=True):
@@ -80,28 +84,22 @@ def _format_val(val):
             return f"{val.name} AS {val.alias}"
         return val.name
     
+    if isinstance(val, TableReference):
+        if val.alias:
+            return f"{val.name} AS {val.alias}"
+        return val.name
+    
+    if isinstance(val, InsertData):
+        return f"table={val.table}"
+    
+    if isinstance(val, CreateTableData):
+        return f"table={val.table}"
+    
+    if isinstance(val, DropTableData):
+        mode = "CASCADE" if val.cascade else "RESTRICT"
+        return f"table={val.table}, mode={mode}"
+    
     if isinstance(val, dict):
-        # untuk INSERT
-        if 'table' in val and 'columns' in val and 'values' in val:
-            cols = ", ".join(val['columns'])
-            vals = ", ".join(str(v) if not isinstance(v, str) else f"'{v}'" for v in val['values'])
-            return f"{val['table']}({cols}) <- ({vals})"
-        # untuk CREATE TABLE
-        if 'table' in val and 'columns' in val and 'primary_key' in val:
-            cols_str = ", ".join(str(c) for c in val['columns'])
-            pk_str = ", ".join(val['primary_key'])
-            fk_str = ", ".join(str(fk) for fk in val['foreign_keys']) if val['foreign_keys'] else ""
-            result = f"{val['table']} [{cols_str}]"
-            if pk_str:
-                result += f" PK({pk_str})"
-            if fk_str:
-                result += f" {fk_str}"
-            return result
-        # untuk DROP TABLE
-        if 'table' in val and 'cascade' in val:
-            mode = "CASCADE" if val['cascade'] else "RESTRICT"
-            return f"{val['table']} {mode}"
-        # default dict
         return str(val)
     
     return str(val)
@@ -130,7 +128,6 @@ def _format_value(value):
         return value.get('column', str(value))
     return str(value)
 
-# fungsi alternatif dengan box drawing yang lebih jelas
 def print_tree_box(node, prefix="", is_last=True, is_root=True):
     if node is None:
         return
@@ -149,10 +146,48 @@ def print_tree_box(node, prefix="", is_last=True, is_root=True):
     # print node
     print(f"{current_prefix}[{node.type}] {val_str}")
     
+    # print detail untuk InsertData, CreateTableData, DropTableData
+    if is_root or True:  # selalu print detail
+        detail_prefix = child_prefix if not is_root else ""
+        _print_node_details(node, detail_prefix, len(node.childs) == 0)
+    
     # print children
     for i, child in enumerate(node.childs):
         is_last_child = (i == len(node.childs) - 1)
         print_tree_box(child, child_prefix, is_last_child, False)
+
+
+def _print_node_details(node, prefix, is_last_node):
+    """print detail tambahan untuk node tertentu"""
+    
+    if node.type == "INSERT" and isinstance(node.val, InsertData):
+        connector = "└── " if is_last_node else "├── "
+        print(f"{prefix}{connector}columns: {node.val.columns}")
+        print(f"{prefix}    └── values: {node.val.values}")
+    
+    elif node.type == "CREATE_TABLE" and isinstance(node.val, CreateTableData):
+        has_pk = len(node.val.primary_key) > 0
+        has_fk = len(node.val.foreign_keys) > 0
+        
+        # columns
+        print(f"{prefix}├── columns:")
+        for i, col in enumerate(node.val.columns):
+            is_last_col = (i == len(node.val.columns) - 1) and not has_pk and not has_fk
+            col_connector = "└── " if is_last_col else "├── "
+            size_str = f"({col.size})" if col.size else ""
+            print(f"{prefix}│   {col_connector}{col.name}: {col.data_type}{size_str}")
+        
+        # primary key
+        if has_pk:
+            pk_connector = "└── " if not has_fk else "├── "
+            print(f"{prefix}{pk_connector}primary_key: {node.val.primary_key}")
+        
+        # foreign keys
+        if has_fk:
+            print(f"{prefix}└── foreign_keys:")
+            for i, fk in enumerate(node.val.foreign_keys):
+                fk_connector = "└── " if i == len(node.val.foreign_keys) - 1 else "├── "
+                print(f"{prefix}    {fk_connector}{fk.column} -> {fk.ref_table}.{fk.ref_column}")
 
 def test_select_simple():
     engine = OptimizationEngine()
@@ -181,7 +216,7 @@ def test_select_simple():
     assert table.type == "TABLE"
     assert isinstance(table.val, TableReference)
     
-    print("\n✓ PASSED\n")
+    print("\nPASSED\n")
 
 def test_select_with_and():
     engine = OptimizationEngine()
@@ -201,7 +236,7 @@ def test_select_with_and():
     assert isinstance(sigma.val, LogicalNode)
     assert sigma.val.operator == "AND"
     
-    print("\n✓ PASSED\n")
+    print("\nPASSED\n")
 
 def test_select_with_or():
     engine = OptimizationEngine()
@@ -221,7 +256,7 @@ def test_select_with_or():
     assert isinstance(sigma.val, LogicalNode)
     assert sigma.val.operator == "OR"
     
-    print("\n✓ PASSED\n")
+    print("\nPASSED\n")
 
 def test_select_with_order_by():
     engine = OptimizationEngine()
@@ -241,7 +276,7 @@ def test_select_with_order_by():
     assert isinstance(sort.val, list)
     assert all(isinstance(item, OrderByItem) for item in sort.val)
     
-    print("\n✓ PASSED\n")
+    print("\nPASSED\n")
 
 def test_select_with_join():
     engine = OptimizationEngine()
@@ -266,7 +301,7 @@ def test_select_with_join():
     assert isinstance(left.val, TableReference)
     assert isinstance(right.val, TableReference)
     
-    print("\n✓ PASSED\n")
+    print("\nPASSED\n")
 
 def test_update():
     engine = OptimizationEngine()
@@ -288,7 +323,7 @@ def test_update():
     assert sigma.type == "SIGMA"
     assert isinstance(sigma.val, ConditionNode)
     
-    print("\n✓ PASSED\n")
+    print("\nPassed\n")
 
 def test_delete():
     engine = OptimizationEngine()
@@ -309,7 +344,7 @@ def test_delete():
     assert sigma.type == "SIGMA"
     assert isinstance(sigma.val, ConditionNode)
     
-    print("\n✓ PASSED\n")
+    print("\nPASSED\n")
 
 def test_insert():
     engine = OptimizationEngine()
@@ -325,9 +360,12 @@ def test_insert():
     
     insert = result.query_tree
     assert insert.type == "INSERT"
-    assert isinstance(insert.val, dict)
+    assert isinstance(insert.val, InsertData)
+    assert insert.val.table == "student"
+    assert insert.val.columns == ["id", "name", "gpa"]
+    assert insert.val.values == [1, "John", 3.5]
     
-    print("\n✓ PASSED\n")
+    print("\nPASSED\n")
 
 def test_create_table():
     engine = OptimizationEngine()
@@ -343,9 +381,12 @@ def test_create_table():
     
     create = result.query_tree
     assert create.type == "CREATE_TABLE"
-    assert isinstance(create.val, dict)
+    assert isinstance(create.val, CreateTableData)
+    assert create.val.table == "student"
+    assert len(create.val.columns) == 2
+    assert create.val.primary_key == ["id"]
     
-    print("\n✓ PASSED\n")
+    print("\nPASSED\n")
 
 def test_drop_table():
     engine = OptimizationEngine()
@@ -361,9 +402,11 @@ def test_drop_table():
     
     drop = result.query_tree
     assert drop.type == "DROP_TABLE"
-    assert isinstance(drop.val, dict)
+    assert isinstance(drop.val, DropTableData)
+    assert drop.val.table == "student"
+    assert drop.val.cascade == True
     
-    print("\n✓ PASSED\n")
+    print("\nPASSED\n")
 
 def test_transaction():
     engine = OptimizationEngine()
@@ -393,7 +436,7 @@ def test_transaction():
     print_tree_box(result.query_tree)
     assert result.query_tree.type == "ROLLBACK"
     
-    print("\n✓ PASSED\n")
+    print("\nPASSED\n")
 
 def test_complex_query():
     engine = OptimizationEngine()
@@ -407,7 +450,7 @@ def test_complex_query():
     print("Query Tree:")
     print_tree_box(result.query_tree)
     
-    print("\n✓ PASSED\n")
+    print("\nPassed\n")
 
 def test_natural_join():
     engine = OptimizationEngine()
@@ -425,7 +468,7 @@ def test_natural_join():
     assert join.type == "JOIN"
     assert join.val == "NATURAL"
     
-    print("\n✓ PASSED\n")
+    print("\nPASSED\n")
 
 def test_cartesian_product():
     engine = OptimizationEngine()
@@ -443,7 +486,7 @@ def test_cartesian_product():
     assert join.type == "JOIN"
     assert join.val == "CARTESIAN"
     
-    print("\n✓ PASSED\n")
+    print("\nPASSED\n")
 
 def test_mixed_and_or():
     engine = OptimizationEngine()
@@ -513,7 +556,7 @@ def test_mixed_and_or():
     assert isinstance(sigma.val.childs[2], LogicalNode)
     assert sigma.val.childs[2].operator == "AND"
     
-    print("\n✓ PASSED\n")
+    print("\nPASSED\n")
 
 if __name__ == "__main__":
     test_select_simple()
@@ -533,5 +576,5 @@ if __name__ == "__main__":
     test_transaction()
     
     print("=" * 50)
-    print("All tests passed! ✓")
+    print("All tests passed!")
     print("=" * 50)

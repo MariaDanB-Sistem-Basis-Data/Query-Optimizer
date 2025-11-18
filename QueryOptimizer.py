@@ -8,7 +8,10 @@ from model.query_tree import (
     SetClause,
     ColumnDefinition,
     ForeignKeyDefinition,
-    TableReference
+    TableReference,
+    InsertData,
+    CreateTableData,
+    DropTableData
 )
 from helper.helper import (
     fold_selection_with_cartesian,
@@ -218,33 +221,24 @@ class OptimizationEngine:
                 columns_list = parse_insert_columns_string(columns_str)
                 values_list = parse_insert_values_string(values_str)
                 
-                insert_node = QueryTree(type="INSERT", val={
-                    'table': table_name,
-                    'columns': columns_list,
-                    'values': values_list
-                })
+                insert_data = InsertData(table_name, columns_list, values_list)
+                insert_node = QueryTree(type="INSERT", val=insert_data)
                 
                 parse_result.query_tree = insert_node
             
             elif q.upper().startswith("CREATE"):
                 table_name, columns, primary_key, foreign_keys = _parse_create_table(q)
                 
-                create_node = QueryTree(type="CREATE_TABLE", val={
-                    'table': table_name,
-                    'columns': columns,
-                    'primary_key': primary_key,
-                    'foreign_keys': foreign_keys
-                })
+                create_data = CreateTableData(table_name, columns, primary_key, foreign_keys)
+                create_node = QueryTree(type="CREATE_TABLE", val=create_data)
                 
                 parse_result.query_tree = create_node
 
             elif q.upper().startswith("DROP"):
                 table_name, is_cascade = _parse_drop_table(q)
                 
-                drop_node = QueryTree(type="DROP_TABLE", val={
-                    'table': table_name,
-                    'cascade': is_cascade
-                })
+                drop_data = DropTableData(table_name, is_cascade)
+                drop_node = QueryTree(type="DROP_TABLE", val=drop_data)
                 
                 parse_result.query_tree = drop_node
 
