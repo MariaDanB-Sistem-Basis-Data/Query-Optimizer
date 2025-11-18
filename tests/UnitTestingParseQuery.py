@@ -1,146 +1,537 @@
 import sys
 import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from QueryOptimizer import OptimizationEngine
+from model.query_tree import (
+    QueryTree,
+    ConditionNode, 
+    LogicalNode, 
+    ColumnNode, 
+    OrderByItem, 
+    TableReference,
+    SetClause,
+    ColumnDefinition,
+    ForeignKeyDefinition
+)
 
-def print_tree(node, prefix="", is_last=True):
+def print_tree(node, indent=0, prefix="ROOT", is_last=True):
     if node is None:
         return
     
-    connector = "└── " if is_last else "├── "
+    # determine connector
+    if indent == 0:
+        connector = ""
+    else:
+        connector = "└── " if is_last else "├── "
     
-    node_info = f"{node.type}"
-    if node.val:
-        val_display = node.val if len(node.val) <= 40 else node.val[:37] + "..."
-        node_info += f" ({val_display})"
+    # format value untuk display
+    val_str = _format_val(node.val)
     
-    print(prefix + connector + node_info)
+    # print current node
+    spacing = "    " * (indent - 1) + ("    " if indent > 0 and is_last else "│   " if indent > 0 else "")
+    if indent == 0:
+        print(f"{node.type}: {val_str}")
+    else:
+        spacing = "    " * (indent - 1) + ("    " if not is_last else "")
+        if indent == 1:
+            spacing = ""
+        print(f"{spacing}{connector}{node.type}: {val_str}")
     
-    extension = "    " if is_last else "│   "
-    
-    if hasattr(node, 'columns') and node.columns and node.columns != "*":
-        if isinstance(node.columns, list):
-            cols_str = ", ".join([c['column'] for c in node.columns[:3]])
-            if len(node.columns) > 3:
-                cols_str += ", ..."
-            print(prefix + extension + "  ⮡ columns=[" + cols_str + "]")
-    
-    if hasattr(node, 'condition') and node.condition:
-        cond_type = node.condition.get('type', '')
-        print(prefix + extension + "  ⮡ condition_type=" + cond_type)
-    
-    if hasattr(node, 'table_name') and node.table_name:
-        table_str = node.table_name
-        if hasattr(node, 'table_alias') and node.table_alias:
-            table_str += f" AS {node.table_alias}"
-        print(prefix + extension + "  ⮡ table=" + table_str)
-    
-    if hasattr(node, 'limit_value') and node.limit_value is not None:
-        print(prefix + extension + f"  ⮡ limit={node.limit_value}")
-    
-    if hasattr(node, 'set_clauses') and node.set_clauses:
-        print(prefix + extension + f"  ⮡ set={node.set_clauses}")
-    
-    if node.childs:
-        for i, child in enumerate(node.childs):
-            is_last_child = (i == len(node.childs) - 1)
-            print_tree(child, prefix + extension, is_last_child)
+    # print children
+    for i, child in enumerate(node.childs):
+        is_last_child = (i == len(node.childs) - 1)
+        print_tree(child, indent + 1, "", is_last_child)
 
-
-def test_query(query_str, description=""):
-    """Test single query"""
-    print("\n" + "="*70)
-    print(f"TEST: {description}")
-    print("="*70)
-    print(f"Query: {query_str}")
-    print("-"*70)
+# helper untuk format val menjadi string yang readable
+def _format_val(val):
+    if val is None:
+        return "∅"
     
-    try:
-        optimizer = OptimizationEngine()
-        parsed = optimizer.parse_query(query_str)
-        
-        if parsed.query_tree:
-            print("Tree Structure:")
-            print_tree(parsed.query_tree)
-        else:
-            print("No tree generated")
-            
-    except Exception as e:
-        print(f"ERROR: {e}")
+    if isinstance(val, str):
+        return f'"{val}"' if val else "∅"
     
-    print("="*70)
+    if isinstance(val, int):
+        return str(val)
+    
+    if isinstance(val, list):
+        if len(val) == 0:
+            return "[]"
+        if isinstance(val[0], ColumnNode):
+            return "[" + ", ".join(str(c) for c in val) + "]"
+        if isinstance(val[0], OrderByItem):
+            return "[" + ", ".join(str(o) for o in val) + "]"
+        if isinstance(val[0], SetClause):
+            return "[" + ", ".join(str(s) for s in val) + "]"
+        if isinstance(val[0], ColumnDefinition):
+            return "[" + ", ".join(str(c) for c in val) + "]"
+        return str(val)
+    
+    if isinstance(val, ConditionNode):
+        left = _format_attr(val.attr)
+        right = _format_value(val.value)
+        return f"{left} {val.op} {right}"
+    
+    if isinstance(val, LogicalNode):
+        childs_str = ", ".join(_format_val(c) for c in val.childs)
+        return f"({val.operator}: {childs_str})"
+    
+    if isinstance(val, TableReference):
+        if val.alias:
+            return f"{val.name} AS {val.alias}"
+        return val.name
+    
+    if isinstance(val, dict):
+        # untuk INSERT
+        if 'table' in val and 'columns' in val and 'values' in val:
+            cols = ", ".join(val['columns'])
+            vals = ", ".join(str(v) if not isinstance(v, str) else f"'{v}'" for v in val['values'])
+            return f"{val['table']}({cols}) <- ({vals})"
+        # untuk CREATE TABLE
+        if 'table' in val and 'columns' in val and 'primary_key' in val:
+            cols_str = ", ".join(str(c) for c in val['columns'])
+            pk_str = ", ".join(val['primary_key'])
+            fk_str = ", ".join(str(fk) for fk in val['foreign_keys']) if val['foreign_keys'] else ""
+            result = f"{val['table']} [{cols_str}]"
+            if pk_str:
+                result += f" PK({pk_str})"
+            if fk_str:
+                result += f" {fk_str}"
+            return result
+        # untuk DROP TABLE
+        if 'table' in val and 'cascade' in val:
+            mode = "CASCADE" if val['cascade'] else "RESTRICT"
+            return f"{val['table']} {mode}"
+        # default dict
+        return str(val)
+    
+    return str(val)
 
+def _format_attr(attr):
+    if isinstance(attr, ColumnNode):
+        if attr.table:
+            return f"{attr.table}.{attr.column}"
+        return attr.column
+    if isinstance(attr, dict):
+        if attr.get('table'):
+            return f"{attr['table']}.{attr['column']}"
+        return attr.get('column', str(attr))
+    return str(attr)
+
+def _format_value(value):
+    if isinstance(value, ColumnNode):
+        if value.table:
+            return f"{value.table}.{value.column}"
+        return value.column
+    if isinstance(value, str):
+        return f"'{value}'"
+    if isinstance(value, dict):
+        if value.get('table'):
+            return f"{value['table']}.{value['column']}"
+        return value.get('column', str(value))
+    return str(value)
+
+# fungsi alternatif dengan box drawing yang lebih jelas
+def print_tree_box(node, prefix="", is_last=True, is_root=True):
+    if node is None:
+        return
+    
+    # connector characters
+    if is_root:
+        current_prefix = ""
+        child_prefix = ""
+    else:
+        current_prefix = prefix + ("└── " if is_last else "├── ")
+        child_prefix = prefix + ("    " if is_last else "│   ")
+    
+    # format value
+    val_str = _format_val(node.val)
+    
+    # print node
+    print(f"{current_prefix}[{node.type}] {val_str}")
+    
+    # print children
+    for i, child in enumerate(node.childs):
+        is_last_child = (i == len(node.childs) - 1)
+        print_tree_box(child, child_prefix, is_last_child, False)
+
+def test_select_simple():
+    engine = OptimizationEngine()
+    query = "SELECT name, age FROM student WHERE id = 1;"
+    result = engine.parse_query(query)
+    
+    print("=" * 50)
+    print("Test SELECT Simple")
+    print("=" * 50)
+    print(f"Query: {query}\n")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    # check PROJECT
+    assert result.query_tree.type == "PROJECT"
+    assert isinstance(result.query_tree.val, list)
+    assert all(isinstance(col, ColumnNode) for col in result.query_tree.val)
+    
+    # check SIGMA
+    sigma = result.query_tree.childs[0]
+    assert sigma.type == "SIGMA"
+    assert isinstance(sigma.val, ConditionNode)
+    
+    # check TABLE
+    table = sigma.childs[0]
+    assert table.type == "TABLE"
+    assert isinstance(table.val, TableReference)
+    
+    print("\n✓ PASSED\n")
+
+def test_select_with_and():
+    engine = OptimizationEngine()
+    query = "SELECT * FROM student WHERE age > 20 AND name = 'John';"
+    result = engine.parse_query(query)
+    
+    print("=" * 50)
+    print("Test SELECT with AND")
+    print("=" * 50)
+    print(f"Query: {query}\n")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    # check SIGMA with LogicalNode
+    sigma = result.query_tree
+    assert sigma.type == "SIGMA"
+    assert isinstance(sigma.val, LogicalNode)
+    assert sigma.val.operator == "AND"
+    
+    print("\n✓ PASSED\n")
+
+def test_select_with_or():
+    engine = OptimizationEngine()
+    query = "SELECT id FROM student WHERE age < 18 OR age > 60;"
+    result = engine.parse_query(query)
+    
+    print("=" * 50)
+    print("Test SELECT with OR")
+    print("=" * 50)
+    print(f"Query: {query}\n")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    proj = result.query_tree
+    sigma = proj.childs[0]
+    assert sigma.type == "SIGMA"
+    assert isinstance(sigma.val, LogicalNode)
+    assert sigma.val.operator == "OR"
+    
+    print("\n✓ PASSED\n")
+
+def test_select_with_order_by():
+    engine = OptimizationEngine()
+    query = "SELECT name, salary FROM employee ORDER BY salary DESC;"
+    result = engine.parse_query(query)
+    
+    print("=" * 50)
+    print("Test SELECT with ORDER BY")
+    print("=" * 50)
+    print(f"Query: {query}\n")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    proj = result.query_tree
+    sort = proj.childs[0]
+    assert sort.type == "SORT"
+    assert isinstance(sort.val, list)
+    assert all(isinstance(item, OrderByItem) for item in sort.val)
+    
+    print("\n✓ PASSED\n")
+
+def test_select_with_join():
+    engine = OptimizationEngine()
+    query = "SELECT s.name, c.title FROM student AS s JOIN course AS c ON s.course_id = c.id;"
+    result = engine.parse_query(query)
+    
+    print("=" * 50)
+    print("Test SELECT with JOIN")
+    print("=" * 50)
+    print(f"Query: {query}\n")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    proj = result.query_tree
+    join = proj.childs[0]
+    assert join.type == "JOIN"
+    
+    left = join.childs[0]
+    right = join.childs[1]
+    assert left.type == "TABLE"
+    assert right.type == "TABLE"
+    assert isinstance(left.val, TableReference)
+    assert isinstance(right.val, TableReference)
+    
+    print("\n✓ PASSED\n")
+
+def test_update():
+    engine = OptimizationEngine()
+    query = "UPDATE employee SET salary = 5000 WHERE id = 1;"
+    result = engine.parse_query(query)
+    
+    print("=" * 50)
+    print("Test UPDATE")
+    print("=" * 50)
+    print(f"Query: {query}\n")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    update = result.query_tree
+    assert update.type == "UPDATE"
+    assert isinstance(update.val, list)
+    
+    sigma = update.childs[0]
+    assert sigma.type == "SIGMA"
+    assert isinstance(sigma.val, ConditionNode)
+    
+    print("\n✓ PASSED\n")
+
+def test_delete():
+    engine = OptimizationEngine()
+    query = "DELETE FROM student WHERE gpa < 2.0;"
+    result = engine.parse_query(query)
+    
+    print("=" * 50)
+    print("Test DELETE")
+    print("=" * 50)
+    print(f"Query: {query}\n")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    delete = result.query_tree
+    assert delete.type == "DELETE"
+    
+    sigma = delete.childs[0]
+    assert sigma.type == "SIGMA"
+    assert isinstance(sigma.val, ConditionNode)
+    
+    print("\n✓ PASSED\n")
+
+def test_insert():
+    engine = OptimizationEngine()
+    query = "INSERT INTO student (id, name, gpa) VALUES (1, 'John', 3.5);"
+    result = engine.parse_query(query)
+    
+    print("=" * 50)
+    print("Test INSERT")
+    print("=" * 50)
+    print(f"Query: {query}\n")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    insert = result.query_tree
+    assert insert.type == "INSERT"
+    assert isinstance(insert.val, dict)
+    
+    print("\n✓ PASSED\n")
+
+def test_create_table():
+    engine = OptimizationEngine()
+    query = "CREATE TABLE student (id int, name varchar(50), PRIMARY KEY(id));"
+    result = engine.parse_query(query)
+    
+    print("=" * 50)
+    print("Test CREATE TABLE")
+    print("=" * 50)
+    print(f"Query: {query}\n")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    create = result.query_tree
+    assert create.type == "CREATE_TABLE"
+    assert isinstance(create.val, dict)
+    
+    print("\n✓ PASSED\n")
+
+def test_drop_table():
+    engine = OptimizationEngine()
+    query = "DROP TABLE student CASCADE;"
+    result = engine.parse_query(query)
+    
+    print("=" * 50)
+    print("Test DROP TABLE")
+    print("=" * 50)
+    print(f"Query: {query}\n")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    drop = result.query_tree
+    assert drop.type == "DROP_TABLE"
+    assert isinstance(drop.val, dict)
+    
+    print("\n✓ PASSED\n")
+
+def test_transaction():
+    engine = OptimizationEngine()
+    
+    print("=" * 50)
+    print("Test Transaction Statements")
+    print("=" * 50)
+    
+    query = "BEGIN TRANSACTION;"
+    result = engine.parse_query(query)
+    print(f"\nQuery: {query}")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    assert result.query_tree.type == "BEGIN_TRANSACTION"
+    
+    query = "COMMIT;"
+    result = engine.parse_query(query)
+    print(f"\nQuery: {query}")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    assert result.query_tree.type == "COMMIT"
+    
+    query = "ROLLBACK;"
+    result = engine.parse_query(query)
+    print(f"\nQuery: {query}")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    assert result.query_tree.type == "ROLLBACK"
+    
+    print("\n✓ PASSED\n")
+
+def test_complex_query():
+    engine = OptimizationEngine()
+    query = "SELECT s.name, c.title FROM student AS s JOIN course AS c ON s.course_id = c.id WHERE s.gpa > 3.0 AND c.year = 2024 ORDER BY s.name ASC LIMIT 10;"
+    result = engine.parse_query(query)
+    
+    print("=" * 50)
+    print("Test Complex Query")
+    print("=" * 50)
+    print(f"Query: {query}\n")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    print("\n✓ PASSED\n")
+
+def test_natural_join():
+    engine = OptimizationEngine()
+    query = "SELECT * FROM student NATURAL JOIN course;"
+    result = engine.parse_query(query)
+    
+    print("=" * 50)
+    print("Test NATURAL JOIN")
+    print("=" * 50)
+    print(f"Query: {query}\n")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    join = result.query_tree
+    assert join.type == "JOIN"
+    assert join.val == "NATURAL"
+    
+    print("\n✓ PASSED\n")
+
+def test_cartesian_product():
+    engine = OptimizationEngine()
+    query = "SELECT * FROM student, course;"
+    result = engine.parse_query(query)
+    
+    print("=" * 50)
+    print("Test Cartesian Product")
+    print("=" * 50)
+    print(f"Query: {query}\n")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    join = result.query_tree
+    assert join.type == "JOIN"
+    assert join.val == "CARTESIAN"
+    
+    print("\n✓ PASSED\n")
+
+def test_mixed_and_or():
+    engine = OptimizationEngine()
+    
+    print("=" * 50)
+    print("Test Mixed AND/OR Conditions")
+    print("=" * 50)
+    
+    # test 1: a AND b OR c
+    query = "SELECT * FROM t WHERE a = 1 AND b = 2 OR c = 3;"
+    result = engine.parse_query(query)
+    print(f"\nQuery: {query}")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    sigma = result.query_tree
+    assert sigma.type == "SIGMA"
+    assert isinstance(sigma.val, LogicalNode)
+    assert sigma.val.operator == "OR"
+    # first child should be AND node
+    assert isinstance(sigma.val.childs[0], LogicalNode)
+    assert sigma.val.childs[0].operator == "AND"
+    
+    # test 2: a OR b AND c
+    query = "SELECT * FROM t WHERE a = 1 OR b = 2 AND c = 3;"
+    result = engine.parse_query(query)
+    print(f"\nQuery: {query}")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    sigma = result.query_tree
+    assert sigma.type == "SIGMA"
+    assert isinstance(sigma.val, LogicalNode)
+    assert sigma.val.operator == "OR"
+    # second child should be AND node
+    assert isinstance(sigma.val.childs[1], LogicalNode)
+    assert sigma.val.childs[1].operator == "AND"
+    
+    # test 3: a AND b AND c OR d
+    query = "SELECT * FROM t WHERE a = 1 AND b = 2 AND c = 3 OR d = 4;"
+    result = engine.parse_query(query)
+    print(f"\nQuery: {query}")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    sigma = result.query_tree
+    assert sigma.type == "SIGMA"
+    assert isinstance(sigma.val, LogicalNode)
+    assert sigma.val.operator == "OR"
+    # first child should be AND with 3 conditions
+    assert isinstance(sigma.val.childs[0], LogicalNode)
+    assert sigma.val.childs[0].operator == "AND"
+    assert len(sigma.val.childs[0].childs) == 3
+    
+    # test 4: a OR b OR c AND d
+    query = "SELECT * FROM t WHERE a = 1 OR b = 2 OR c = 3 AND d = 4;"
+    result = engine.parse_query(query)
+    print(f"\nQuery: {query}")
+    print("Query Tree:")
+    print_tree_box(result.query_tree)
+    
+    sigma = result.query_tree
+    assert sigma.type == "SIGMA"
+    assert isinstance(sigma.val, LogicalNode)
+    assert sigma.val.operator == "OR"
+    # last child should be AND node
+    assert isinstance(sigma.val.childs[2], LogicalNode)
+    assert sigma.val.childs[2].operator == "AND"
+    
+    print("\n✓ PASSED\n")
 
 if __name__ == "__main__":
-    # SELECT Tests
-    test_query("SELECT * FROM students;", "1. Simple SELECT *")
+    test_select_simple()
+    test_select_with_and()
+    test_select_with_or()
+    test_mixed_and_or()
+    test_select_with_order_by()
+    test_select_with_join()
+    test_natural_join()
+    test_cartesian_product()
+    test_complex_query()
+    test_update()
+    test_delete()
+    test_insert()
+    test_create_table()
+    test_drop_table()
+    test_transaction()
     
-    test_query("SELECT name, age FROM students;", "2. SELECT specific columns")
-    
-    test_query("SELECT name FROM students WHERE age > 18;", "3. SELECT with WHERE")
-    
-    test_query("SELECT name FROM students WHERE age > 18 AND gpa > 3.0;", 
-               "4. SELECT with WHERE AND (Single SIGMA)")
-    
-    test_query("SELECT * FROM students WHERE age < 18 OR age > 65;", 
-               "5. SELECT with WHERE OR")
-    
-    test_query("SELECT * FROM students WHERE age > 18 AND gpa > 3.0 OR department = 'CS';",
-               "6. SELECT MIXED AND/OR (SHOULD WORK!)")
-    
-    test_query("SELECT name FROM students ORDER BY age DESC LIMIT 10;",
-               "7. SELECT with ORDER BY and LIMIT")
-    
-    test_query("SELECT department FROM students GROUP BY department;",
-               "8. SELECT with GROUP BY")
-    
-    test_query("SELECT s.name FROM student AS s WHERE s.age > 18;",
-               "9. SELECT with table alias")
-    
-    test_query("SELECT * FROM students, courses;",
-               "10. SELECT Cartesian Product")
-    
-    test_query("SELECT * FROM students JOIN courses ON students.id = courses.student_id;",
-               "11. SELECT with JOIN ON")
-    
-    test_query("SELECT * FROM students NATURAL JOIN enrollments;",
-               "12. SELECT with NATURAL JOIN")
-    
-    # UPDATE Tests
-    test_query("UPDATE students SET gpa = 4.0;", "13. Simple UPDATE")
-    
-    test_query("UPDATE students SET gpa = 4.0, age = 21;", 
-               "14. UPDATE multiple SET")
-    
-    test_query("UPDATE students SET gpa = 4.0 WHERE id = 123;", 
-               "15. UPDATE with WHERE")
-    
-    test_query("UPDATE employee SET salary = 1.05 * salary WHERE department = 'IT' AND years > 5;",
-               "16. UPDATE with expression and multiple WHERE")
-    
-    # DELETE Tests
-    test_query("DELETE FROM students;", "17. Simple DELETE")
-    
-    test_query("DELETE FROM students WHERE age < 18;", "18. DELETE with WHERE")
-    
-    test_query("DELETE FROM employee WHERE department = 'RnD' AND salary < 5000;",
-               "19. DELETE with multiple WHERE AND")
-    
-    # INSERT Tests
-    test_query("INSERT INTO students (id, name, age) VALUES (1, 'Alice', 20);",
-               "20. Simple INSERT")
-    
-    # Transaction Tests
-    test_query("BEGIN TRANSACTION;", "21. BEGIN TRANSACTION")
-    test_query("COMMIT;", "22. COMMIT")
-    test_query("ROLLBACK;", "23. ROLLBACK")
-    
-    print("\n" + "╔" + "="*68 + "╗")
-    print("║" + " "*25 + "TESTS COMPLETED" + " "*28 + "║")
-    print("╚" + "="*68 + "╝")
-    print("\nCatatan:")
-    print("- Single SIGMA untuk WHERE (dengan structured condition)")
-    print("- Check apakah UPDATE multiple SET jadi single atau chained")
-    print("- Mixed AND/OR sekarang SUPPORTED!")
-    print("- Symbol ⮡ menunjukkan structured attributes\n")
+    print("=" * 50)
+    print("All tests passed! ✓")
+    print("=" * 50)
