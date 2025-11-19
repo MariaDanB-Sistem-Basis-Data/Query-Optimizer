@@ -1,41 +1,269 @@
-from model.query_tree import QueryTree
+# ===============================================================
+# helper.py (FINAL — full, stable version)
+# ===============================================================
+
 import re
+from model.query_tree import QueryTree
 
-# util kecil
-def _is_cartesian(join_node: QueryTree) -> bool:
-    return join_node.type == "JOIN" and (join_node.val == "" or join_node.val.upper() == "CARTESIAN")
 
-def _is_theta(join_node: QueryTree) -> bool:
-    return join_node.type == "JOIN" and join_node.val.upper().startswith("THETA:")
+# ===============================================================
+#  CONDITION TREE STRUCTURES
+# ===============================================================
 
-def _is_natural(join_node: QueryTree) -> bool:
-    return join_node.type == "JOIN" and join_node.val.upper() == "NATURAL"
+class ConditionNode:
+    """
+    Simple atomic condition: attr op value
+    Example:   age > 18
+    """
+    def __init__(self, attr, op, value):
+        self.attr = attr.strip()
+        self.op = op.strip()
+        self.value = value.strip()
 
-def _theta_pred(join_node: QueryTree) -> str:
-    if not _is_theta(join_node): return ""
-    return join_node.val.split(":", 1)[1].strip()
+    def __repr__(self):
+        return f"ConditionNode({self.attr} {self.op} {self.value})"
 
-def _mk_theta(pred: str) -> str:
-    return f"THETA:{pred.strip()}"
 
-def _tables_under(node: QueryTree):
-    """Extract all table names from a query tree"""
-    out = []
+class LogicalNode:
+    """
+    Logical AND/OR: operator + list of children
+    children = ConditionNode | LogicalNode
+    """
+    def __init__(self, operator, childs):
+        self.operator = operator.upper().strip()
+        self.childs = list(childs)
+
+    def __repr__(self):
+        return f"LogicalNode({self.operator}, {self.childs})"
+
+
+# ===============================================================
+#  CONDITION PARSER UTILITIES
+# ===============================================================
+
+_comparison_ops = ['>=', '<=', '<>', '!=', '=', '>', '<']
+
+def _strip_outer_paren(s):
+    """Remove outer parentheses only if they wrap whole expression."""
+    s = s.strip()
+    while s.startswith("(") and s.endswith(")"):
+        depth = 0
+        ok = True
+        for i, ch in enumerate(s):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            if depth == 0 and i < len(s) - 1:
+                ok = False
+                break
+        if not ok:
+            break
+        s = s[1:-1].strip()
+    return s
+
+
+def _split_top_level(s, sep):
+    """Split string by sep (AND/OR) but NOT inside parentheses."""
+    parts = []
+    cur = ""
+    depth = 0
+    i = 0
+    L = len(s)
+    sep_upper = sep.upper()
+
+    while i < L:
+        ch = s[i]
+        if ch == "(":
+            depth += 1
+            cur += ch
+            i += 1
+            continue
+        if ch == ")":
+            depth -= 1
+            cur += ch
+            i += 1
+            continue
+        if depth == 0:
+            segment = s[i:i+len(sep_upper)].upper()
+            if segment == sep_upper:
+                prev_ok = i == 0 or not s[i-1].isalnum()
+                next_ok = i+len(sep_upper) >= L or not s[i+len(sep_upper)].isalnum()
+                if prev_ok and next_ok:
+                    parts.append(cur.strip())
+                    cur = ""
+                    i += len(sep_upper)
+                    continue
+        cur += ch
+        i += 1
+    if cur.strip():
+        parts.append(cur.strip())
+    return parts
+
+
+def _parse_simple_condition(s):
+    """Parse atomic condition → ConditionNode."""
+    s = s.strip()
+
+    # IN
+    m = re.search(r"\bIN\b", s, flags=re.IGNORECASE)
+    if m:
+        left = s[:m.start()].strip()
+        right = s[m.end():].strip()
+        return ConditionNode(left, "IN", right)
+
+    # LIKE
+    m = re.search(r"\bLIKE\b", s, flags=re.IGNORECASE)
+    if m:
+        left = s[:m.start()].strip()
+        right = s[m.end():].strip()
+        return ConditionNode(left, "LIKE", right)
+
+    for op in sorted(_comparison_ops, key=lambda x: -len(x)):
+        if op in s:
+            left, right = s.split(op, 1)
+            return ConditionNode(left.strip(), op, right.strip())
+
+    return ConditionNode(s, "UNKNOWN", "")
+
+
+def build_logical_tree_from_where(expr):
+    """Build nested AND/OR/condition tree."""
+    if not expr:
+        return None
+
+    s = _strip_outer_paren(expr.strip())
+
+    # OR
+    parts = _split_top_level(s, "OR")
+    if len(parts) > 1:
+        return LogicalNode("OR", [build_logical_tree_from_where(p) for p in parts])
+
+    # AND
+    parts = _split_top_level(s, "AND")
+    if len(parts) > 1:
+        return LogicalNode("AND", [build_logical_tree_from_where(p) for p in parts])
+
+    # atomic
+    ss = _strip_outer_paren(s)
+    if ss != s:
+        return build_logical_tree_from_where(ss)
+
+    return _parse_simple_condition(ss)
+
+
+# ===============================================================
+#  CONDITION TREE → STRING (for printing)
+# ===============================================================
+
+def _stringify_condition_tree(node):
+    if isinstance(node, ConditionNode):
+        return f"{node.attr} {node.op} {node.value}"
+
+    if isinstance(node, LogicalNode):
+        parts = [f"({_stringify_condition_tree(c)})" for c in node.childs]
+        return (" " + node.operator + " ").join(parts)[1:-1]
+
+    return str(node)
+
+
+# ===============================================================
+#  TABLE EXTRACTION
+# ===============================================================
+
+def _tables_under(node):
+    results = []
     def dfs(n):
         if n.type == "TABLE":
-            out.append(n.val)
+            results.append(n.val)
         for c in n.childs:
             dfs(c)
     dfs(node)
-    return set(out)
+    return set(results)
 
-# σθ(E1 × E2)  ⇒  E1 ⋈θ E2
-def fold_selection_with_cartesian(node: QueryTree):
+
+# ===============================================================
+#  JOIN HELPERS
+# ===============================================================
+
+def _is_cartesian(j):
+    return j.type == "JOIN" and (j.val == "" or j.val.upper() == "CARTESIAN")
+
+def _is_theta(j):
+    return j.type == "JOIN" and isinstance(j.val, str) and j.val.upper().startswith("THETA:")
+
+def _is_natural(j):
+    return j.type == "JOIN" and j.val.upper() == "NATURAL"
+
+def _theta_pred(j):
+    return j.val.split(":", 1)[1].strip() if _is_theta(j) else ""
+
+def _mk_theta(pred):
+    return f"THETA:{pred.strip()}"
+
+
+# ===============================================================
+# FROM + JOIN PARSER (FINAL)
+# ===============================================================
+
+def _parse_single_table(raw):
+    parts = raw.split()
+    if len(parts) == 1:
+        return QueryTree("TABLE", parts[0])
+    if len(parts) == 2:
+        return QueryTree("TABLE", f"{parts[0]} AS {parts[1]}")
+    if len(parts) == 3 and parts[1].upper() == "AS":
+        return QueryTree("TABLE", f"{parts[0]} AS {parts[2]}")
+    raise Exception(f"Invalid table syntax: {raw}")
+
+
+def _parse_from_clause(q):
+    pattern = r"\bFROM\b(.+?)(WHERE|GROUP BY|ORDER BY|LIMIT|$)"
+    block = re.search(pattern, q, flags=re.IGNORECASE | re.DOTALL)
+    if not block:
+        raise Exception("FROM clause not found")
+
+    from_block = block.group(1).strip().replace("\n", " ")
+    from_block = re.sub(r"\s+", " ", from_block)
+
+    tokens = re.split(r"\b(JOIN|LEFT JOIN|RIGHT JOIN|FULL JOIN)\b",
+                      from_block, flags=re.IGNORECASE)
+
+    base_raw = tokens[0].strip()
+    root = _parse_single_table(base_raw)
+
+    i = 1
+    while i < len(tokens) - 1:
+        join_type = tokens[i].strip().upper()
+        right_part = tokens[i+1].strip()
+
+        m = re.match(r"(.+?)\bON\b(.+)", right_part, flags=re.IGNORECASE)
+        if not m:
+            raise Exception(f"Invalid JOIN syntax: {right_part}")
+
+        table_raw = m.group(1).strip()
+        cond_raw = m.group(2).strip()
+
+        right_table = _parse_single_table(table_raw)
+        join = QueryTree("JOIN", f"THETA:{cond_raw}")
+        join.add_child(root)
+        join.add_child(right_table)
+        root = join
+
+        i += 2
+
+    return root
+
+
+# ===============================================================
+# REWRITE RULES (FINAL)
+# ===============================================================
+
+def fold_selection_with_cartesian(node):
     if node.type == "SIGMA" and node.childs and _is_cartesian(node.childs[0]):
         join = node.childs[0]
-        pred = node.val  # seluruh predicate disimpan di val
-        join.val = _mk_theta(pred)
-        # ganti sigma dengan join
+        pred = node.val
+        join.val = _mk_theta(_stringify_condition_tree(pred))
         if node.parent:
             node.parent.replace_child(node, join)
             join.parent = node.parent
@@ -44,15 +272,14 @@ def fold_selection_with_cartesian(node: QueryTree):
         return join
     return node
 
-# σθ(E1 ⋈θ2 E2)  ⇒  E1 ⋈(θ ∧ θ2) E2
-def merge_selection_into_join(node: QueryTree):
+
+def merge_selection_into_join(node):
     if node.type == "SIGMA" and node.childs and _is_theta(node.childs[0]):
         join = node.childs[0]
-        p_old = _theta_pred(join)
-        p_new = node.val
-        merged = p_new if not p_old else f"{p_new} AND {p_old}"
+        old = _theta_pred(join)
+        new = _stringify_condition_tree(node.val)
+        merged = f"{new} AND {old}" if old else new
         join.val = _mk_theta(merged)
-        # angkat join, hilangkan sigma
         if node.parent:
             node.parent.replace_child(node, join)
             join.parent = node.parent
@@ -61,992 +288,460 @@ def merge_selection_into_join(node: QueryTree):
         return join
     return node
 
-# Komutatif: E1 ⋈ E2 = E2 ⋈ E1
-def make_join_commutative(join_node: QueryTree):
-    if join_node.type == "JOIN" and len(join_node.childs) == 2:
-        join_node.childs[0], join_node.childs[1] = join_node.childs[1], join_node.childs[0]
-        join_node.childs[0].parent = join_node
-        join_node.childs[1].parent = join_node
-    return join_node
 
-# Natural join asosiatif: (E1 ⋈ E2) ⋈ E3 = E1 ⋈ (E2 ⋈ E3)
-def associate_natural_join(node: QueryTree) -> QueryTree:
+# -----------------------------------------------
+# Canonical join commutativity (safe)
+# -----------------------------------------------
+def canonical_join_order(join):
+    if join.type != "JOIN" or len(join.childs) != 2:
+        return join
+    L, R = join.childs
+
+    from helper.helper import _tables_under
+    def key(x):
+        t = _tables_under(x)
+        if t:
+            return sorted([v.lower() for v in t])[0]
+        return x.type.lower()
+
+    if key(L) > key(R):
+        join.childs[0], join.childs[1] = R, L
+        R.parent = join
+        L.parent = join
+
+    return join
+
+
+# -----------------------------------------------
+# Natural join associativity
+# -----------------------------------------------
+def associate_natural_join(node):
     if node.type == "JOIN" and _is_natural(node):
         L, R = node.childs
         if L.type == "JOIN" and _is_natural(L):
-            # (A ⋈ B) ⋈ C  =>  A ⋈ (B ⋈ C)
-            A = L.childs[0]; B = L.childs[1]; C = R
-            inner = QueryTree("JOIN", "NATURAL", [B, C]); B.parent = inner; C.parent = inner
-            rot = QueryTree("JOIN", "NATURAL", [A, inner]); A.parent = rot; inner.parent = rot
-            return rot
+            A, B = L.childs
+            C = R
+            inner = QueryTree("JOIN", "NATURAL", [B, C])
+            B.parent = inner; C.parent = inner
+            res = QueryTree("JOIN", "NATURAL", [A, inner])
+            A.parent = res; inner.parent = res
+            return res
         if R.type == "JOIN" and _is_natural(R):
-            # A ⋈ (B ⋈ C)  =>  (A ⋈ B) ⋈ C   (bentuk lain, tapi kita sediakan juga)
-            B = R.childs[0]; C = R.childs[1]; A = L
-            inner = QueryTree("JOIN", "NATURAL", [A, B]); A.parent = inner; B.parent = inner
-            rot = QueryTree("JOIN", "NATURAL", [inner, C]); inner.parent = rot; C.parent = rot
-            return rot
+            B, C = R.childs
+            A = L
+            inner = QueryTree("JOIN", "NATURAL", [A, B])
+            A.parent = inner; B.parent = inner
+            res = QueryTree("JOIN", "NATURAL", [inner, C])
+            inner.parent = res; C.parent = res
+            return res
     return node
 
-# Theta join asosiatif (syarat θ2 hanya atribut E2 dan E3)
-# (E1 ⋈θ1 E2) ⋈θ12 E3 = E1 ⋈θ12 (E2 ⋈θ2 E3)
-def associate_theta_join(node: QueryTree) -> QueryTree:
+
+# -----------------------------------------------
+# Theta join associativity
+# -----------------------------------------------
+def associate_theta_join(node):
     if node.type != "JOIN" or not _is_theta(node):
         return node
     L, R = node.childs
-    # kasus (E1⋈θ1E2) ⋈θ12 E3
     if L.type == "JOIN" and _is_theta(L):
         A, B = L.childs
         C = R
-        inner = QueryTree("JOIN", L.val, [B, C]); B.parent = inner; C.parent = inner
-        rot = QueryTree("JOIN", node.val, [A, inner]); A.parent = rot; inner.parent = rot
-        return rot
-    # kasus E1 ⋈θ12 (E2⋈θ2E3)
+        inner = QueryTree("JOIN", L.val, [B, C])
+        B.parent = inner; C.parent = inner
+        res = QueryTree("JOIN", node.val, [A, inner])
+        A.parent = res; inner.parent = res
+        return res
     if R.type == "JOIN" and _is_theta(R):
-        A = L
         B, C = R.childs
-        inner = QueryTree("JOIN", R.val, [B, C]); B.parent = inner; C.parent = inner
-        rot = QueryTree("JOIN", node.val, [A, inner]); A.parent = rot; inner.parent = rot
-        return rot
+        A = L
+        inner = QueryTree("JOIN", R.val, [B, C])
+        B.parent = inner; C.parent = inner
+        res = QueryTree("JOIN", node.val, [A, inner])
+        A.parent = res; inner.parent = res
+        return res
     return node
 
-def plan_cost(node: QueryTree, stats: dict) -> int:
-    """Biaya sederhana: 
-       TABLE: b_r
-       JOIN:  cost(left)+cost(right) + left_rows * right_blocks + left_blocks
-       (mengarah ke left-deep yang memanfaatkan tabel kecil/seleksi awal)"""
+
+# ===============================================================
+#  SELECTION DECOMPOSITION (σ(A AND B AND C))
+# ===============================================================
+
+def decompose_conjunctive_selection(node):
+    if node.type != "SIGMA" or not isinstance(node.val, LogicalNode):
+        return node
+
+    cond = node.val
+    if cond.operator != "AND":
+        return node
+
+    child = node.childs[0]
+    curr = child
+    for c in reversed(cond.childs):
+        sigma = QueryTree("SIGMA", c)
+        if curr:
+            sigma.add_child(curr)
+        curr = sigma
+
+    if node.parent:
+        node.parent.replace_child(node, curr)
+        curr.parent = node.parent
+    else:
+        curr.parent = None
+
+    return curr
+
+
+# ===============================================================
+#  SELECTION PUSH-DOWN (Rule 4)
+# ===============================================================
+
+def _extract_attributes_from_condition(c):
+    if isinstance(c, ConditionNode):
+        return [c.attr]
+    if isinstance(c, LogicalNode):
+        out = []
+        for ch in c.childs:
+            out.extend(_extract_attributes_from_condition(ch))
+        return out
+    if isinstance(c, str):
+        return re.findall(r"\b\w+\.\w+\b", c)
+    return []
+
+
+def push_selection_through_join_single(node):
+    if node.type != "SIGMA" or not node.childs:
+        return node
+    join = node.childs[0]
+    if join.type != "JOIN":
+        return node
+
+    L, R = join.childs
+    Lset = _tables_under(L)
+    Rset = _tables_under(R)
+
+    attrs = _extract_attributes_from_condition(node.val)
+    belongL = any(a.split('.')[0] in Lset for a in attrs if '.' in a)
+    belongR = any(a.split('.')[0] in Rset for a in attrs if '.' in a)
+
+    if belongL and not belongR:
+        sigmaL = QueryTree("SIGMA", node.val)
+        sigmaL.add_child(L)
+        join.childs[0] = sigmaL
+        sigmaL.parent = join
+        if node.parent:
+            node.parent.replace_child(node, join)
+            join.parent = node.parent
+        return join
+
+    if belongR and not belongL:
+        sigmaR = QueryTree("SIGMA", node.val)
+        sigmaR.add_child(R)
+        join.childs[1] = sigmaR
+        sigmaR.parent = join
+        if node.parent:
+            node.parent.replace_child(node, join)
+            join.parent = node.parent
+        return join
+
+    return node
+
+
+def push_selection_through_join_split(node):
+    if node.type != "SIGMA" or not node.childs:
+        return node
+    join = node.childs[0]
+    if join.type != "JOIN":
+        return node
+    cond = node.val
+    if not isinstance(cond, LogicalNode) or cond.operator != "AND":
+        return node
+
+    L, R = join.childs
+    Lset = _tables_under(L)
+    Rset = _tables_under(R)
+
+    lefts, rights, mixed = [], [], []
+
+    for c in cond.childs:
+        attrs = _extract_attributes_from_condition(c)
+        bl = any(a.split('.')[0] in Lset for a in attrs if '.' in a)
+        br = any(a.split('.')[0] in Rset for a in attrs if '.' in a)
+        if bl and not br: lefts.append(c)
+        elif br and not bl: rights.append(c)
+        else: mixed.append(c)
+
+    changed = False
+    if lefts:
+        newval = lefts[0] if len(lefts) == 1 else LogicalNode("AND", lefts)
+        sL = QueryTree("SIGMA", newval); sL.add_child(L)
+        join.childs[0] = sL; sL.parent = join; changed = True
+
+    if rights:
+        newval = rights[0] if len(rights) == 1 else LogicalNode("AND", rights)
+        sR = QueryTree("SIGMA", newval); sR.add_child(R)
+        join.childs[1] = sR; sR.parent = join; changed = True
+
+    if changed:
+        if mixed:
+            node.val = mixed[0] if len(mixed)==1 else LogicalNode("AND", mixed)
+            return node
+        else:
+            if node.parent:
+                node.parent.replace_child(node, join)
+                join.parent = node.parent
+            return join
+
+    return node
+
+
+# ===============================================================
+#  PROJECTION PUSH-DOWN (Rule 5)
+# ===============================================================
+
+def push_projection_through_join_simple(node):
+    if node.type != "PROJECT" or not node.childs:
+        return node
+    join = node.childs[0]
+    if join.type != "JOIN":
+        return node
+
+    L, R = join.childs
+    Lset = _tables_under(L)
+    Rset = _tables_under(R)
+
+    cols = [c.strip() for c in node.val.split(",")]
+    Lcols = [c for c in cols if c.split('.')[0] in Lset]
+    Rcols = [c for c in cols if c.split('.')[0] in Rset]
+
+    if Lcols and Rcols:
+        left_proj = QueryTree("PROJECT", ", ".join(Lcols))
+        left_proj.add_child(L)
+        join.childs[0] = left_proj; left_proj.parent = join
+
+        right_proj = QueryTree("PROJECT", ", ".join(Rcols))
+        right_proj.add_child(R)
+        join.childs[1] = right_proj; right_proj.parent = join
+
+        if node.parent:
+            node.parent.replace_child(node, join)
+            join.parent = node.parent
+        else:
+            join.parent = None
+
+        return join
+
+    return node
+
+
+def push_projection_through_join_with_join_attrs(node):
+    if node.type != "PROJECT" or not node.childs:
+        return node
+    join = node.childs[0]
+    if join.type != "JOIN" or not _is_theta(join):
+        return node
+
+    L, R = join.childs
+    Lset = _tables_under(L)
+    Rset = _tables_under(R)
+
+    cols = [c.strip() for c in node.val.split(",")]
+    theta = _theta_pred(join)
+    join_attrs = re.findall(r"\b\w+\.\w+\b", theta)
+
+    Lcols = [c for c in cols if c.split('.')[0] in Lset]
+    Rcols = [c for c in cols if c.split('.')[0] in Rset]
+
+    Lj = [a for a in join_attrs if a.split('.')[0] in Lset and a not in Lcols]
+    Rj = [a for a in join_attrs if a.split('.')[0] in Rset and a not in Rcols]
+
+    if Lcols or Lj:
+        lp = QueryTree("PROJECT", ", ".join(Lcols + Lj))
+        lp.add_child(L)
+        join.childs[0] = lp; lp.parent = join
+
+    if Rcols or Rj:
+        rp = QueryTree("PROJECT", ", ".join(Rcols + Rj))
+        rp.add_child(R)
+        join.childs[1] = rp; rp.parent = join
+
+    return node
+
+
+# ===============================================================
+#  REDUNDANT PROJECTION REMOVAL
+# ===============================================================
+
+def eliminate_redundant_projections(node):
+    if node.type != "PROJECT" or not node.childs:
+        return node
+    c = node.childs[0]
+    if c.type == "PROJECT":
+        # collapse nested projects
+        while c.childs and c.childs[0].type == "PROJECT":
+            c = c.childs[0]
+        if c.childs:
+            node.childs = [c.childs[0]]
+            c.childs[0].parent = node
+        return node
+    return node
+
+
+# ===============================================================
+#  SELECTION SWAP ORDER
+# ===============================================================
+
+def swap_selection_order(node):
+    if node.type != "SIGMA":
+        return node
+    if not node.childs or node.childs[0].type != "SIGMA":
+        return node
+
+    s1_val = node.val
+    s2 = node.childs[0]
+    s2_val = s2.val
+    deeper = s2.childs[0] if s2.childs else None
+
+    new_s1 = QueryTree("SIGMA", s1_val)
+    if deeper:
+        new_s1.add_child(deeper)
+
+    new_s2 = QueryTree("SIGMA", s2_val)
+    new_s2.add_child(new_s1)
+
+    if node.parent:
+        node.parent.replace_child(node, new_s2)
+        new_s2.parent = node.parent
+    else:
+        new_s2.parent = None
+
+    return new_s2
+
+
+# ===============================================================
+#  COST HELPERS
+# ===============================================================
+
+def plan_cost(node, stats):
+    """
+    Very rough cost for join order testing (not final cost model).
+    Just sum recursively.
+    """
     if node.type == "TABLE":
-        t = node.val
-        return stats.get(t, {}).get("b_r", 1000)
+        return stats.get(node.val, {}).get("b_r", 100)
 
     if node.type == "SIGMA":
         return plan_cost(node.childs[0], stats) if node.childs else 0
 
     if node.type == "JOIN":
         L, R = node.childs
-        cl = plan_cost(L, stats)
-        cr = plan_cost(R, stats)
-        def rows(n):
-            if n.type == "TABLE":
-                return stats.get(n.val, {}).get("n_r", 1000)
-            if n.type == "JOIN":
-                return max(rows(n.childs[0]), rows(n.childs[1]))
-            if n.type == "SIGMA":
-                return max(1, rows(n.childs[0]) // 2)
-            return 1000
-        def blocks(n):
-            if n.type == "TABLE":
-                return stats.get(n.val, {}).get("b_r", 100)
-            if n.type == "JOIN":
-                return blocks(n.childs[0]) + blocks(n.childs[1])
-            if n.type == "SIGMA":
-                return max(1, blocks(n.childs[0]) // 2)
-            return 100
-        nl = rows(L) * blocks(R) + blocks(L)  # nested-loop approx
-        return cl + cr + nl
+        return plan_cost(L, stats) + plan_cost(R, stats) + 10
 
-    # node lain: jumlahkan anak
-    return sum(plan_cost(c, stats) for c in node.childs)
+    cost = 0
+    for c in node.childs:
+        cost += plan_cost(c, stats)
+    return cost
 
-def choose_best(plans, stats: dict) -> QueryTree:
-    best = None
-    best_cost = None
+
+def choose_best(plans, stats):
+    best, best_c = None, None
     for p in plans:
         c = plan_cost(p, stats)
-        if best is None or c < best_cost:
-            best, best_cost = p, c
+        if best is None or c < best_c:
+            best, best_c = p, c
     return best
 
-def build_join_tree(order, join_conditions: dict = None) -> QueryTree:
-    """order: ['A','B','C']
-       join_conditions: {frozenset({'A','B'}): 'A.x=B.y', ...}
-       Buat left-deep: (((A ⋈ B) ⋈ C) ...)
-       Gunakan THETA jika ada predicate, selain itu CARTESIAN."""
-    if join_conditions is None:
-        join_conditions = {}
-    
-    if not order:
-        return None
-    
-    cur = QueryTree("TABLE", order[0])
-    for i in range(1, len(order)):
-        name = order[i]
-        right = QueryTree("TABLE", name)
-        # cari predicate join
-        key = frozenset({order[0], name})
-        pred = join_conditions.get(key, "")
-        val = _mk_theta(pred) if pred else "CARTESIAN"
-        cur = QueryTree("JOIN", val, [cur, right])
-        cur.childs[0].parent = cur
-        right.parent = cur
-    return cur
 
-def _first_table(node: QueryTree) -> str:
-    if node.type == "TABLE": return node.val
-    return _first_table(node.childs[0])
+# ===============================================================
+# ORDER BY, GROUP BY, LIMIT, UPDATE, DELETE, INSERT PARSERS
+# ===============================================================
 
-# Pipeline: dari ParsedQuery → best join plan
-def join_order_optimize(pq, stats: dict):
-    """Ambil tabel dari pohon (dummy SELECT/ FROM) lalu buat 3-5 kandidat urutan,
-       pilih yang biaya terendah."""
-    tables = list(_tables_under(pq.query_tree))
-    if len(tables) <= 1:
-        return pq  # tidak ada join
-
-    # buat beberapa kandidat (tanpa itertools)
-    orders = _some_permutations(tables, max_count=5)
-    # map kondisi join dummy (bisa diisi dari parser logis jika sudah)
-    join_map = {}  # {frozenset({'A','B'}): 'A.x=B.y', ...}
-    plans = [build_join_tree(o[:], join_map) for o in orders]
-    best = choose_best(plans, stats)
-    return pq.__class__(pq.query, best)
-
-def _some_permutations(items, max_count=5):
-    res = []
-    used = [False]*len(items)
-    cur = []
-    def bt():
-        if len(cur) == len(items):
-            res.append(cur[:])
-            return
-        if len(res) >= max_count: return
-        for i in range(len(items)):
-            if not used[i]:
-                used[i] = True
-                cur.append(items[i])
-                bt()
-                cur.pop()
-                used[i] = False
-    bt()
-    return res if res else [items]
+def validate_query(q):
+    if not q.strip().endswith(";"):
+        return False, "Missing semicolon"
+    if not q.strip():
+        return False, "Empty query"
+    QC = q.strip().upper()
+    if not any(QC.startswith(x) for x in ["SELECT", "UPDATE", "DELETE", "INSERT", "CREATE", "DROP"]):
+        return False, "Unsupported query type"
+    return True, "OK"
 
 
-# Aturan 1: Operasi seleksi konjungtif dapat diuraikan menjadi urutan seleksi
-# σ₁∧₂(E) = σ₁(σ₂(E))
-def decompose_conjunctive_selection(node: QueryTree) -> QueryTree:
-    if node.type != "SIGMA" or not node.val:
-        return node
-    
-    if " AND " in node.val.upper():
-        conditions = re.split(r'\s+AND\s+', node.val, flags=re.IGNORECASE)
-        
-        current = node.childs[0] if node.childs else None
-        
-        for cond in reversed(conditions):
-            sigma = QueryTree("SIGMA", cond.strip())
-            if current:
-                sigma.add_child(current)
-            current = sigma
-        
-        if node.parent:
-            node.parent.replace_child(node, current)
-            current.parent = node.parent
-        else:
-            current.parent = None
-        
-        return current
-    return node
+def _get_columns_from_select(q):
+    m = re.search(r"SELECT\s+(.+?)\s+FROM", q, flags=re.IGNORECASE | re.DOTALL)
+    return m.group(1).strip() if m else "*"
 
-# Aturan 2: Operasi seleksi bersifat komutatif
-# σ₁(σ₂(E)) = σ₂(σ₁(E))
-def swap_selection_order(node: QueryTree) -> QueryTree:
-    if node.type == "SIGMA" and node.childs and node.childs[0].type == "SIGMA":
-        sigma1_val = node.val
-        sigma2 = node.childs[0]
-        sigma2_val = sigma2.val
-        child_of_sigma2 = sigma2.childs[0] if sigma2.childs else None
-        
-        new_sigma1 = QueryTree("SIGMA", sigma1_val)
-        if child_of_sigma2:
-            new_sigma1.add_child(child_of_sigma2)
-        
-        new_sigma2 = QueryTree("SIGMA", sigma2_val)
-        new_sigma2.add_child(new_sigma1)
 
-        if node.parent:
-            node.parent.replace_child(node, new_sigma2)
-            new_sigma2.parent = node.parent
-        else:
-            new_sigma2.parent = None
-        
-        return new_sigma2
-    
-    return node
+def _get_condition_from_where(q):
+    m = re.search(r"\bWHERE\b(.+)", q, flags=re.IGNORECASE | re.DOTALL)
+    if not m: return ""
+    s = m.group(1)
+    s = re.split(r"\bORDER BY\b|\bGROUP BY\b|\bLIMIT\b", s, flags=re.IGNORECASE)[0]
+    return s.strip()
 
-# Aturan 3: Hanya proyeksi terakhir dalam urutan proyeksi yang diperlukan
-# ΠL₁(ΠL₂(...ΠLn(E))) = ΠL₁(E)
-def eliminate_redundant_projections(node: QueryTree) -> QueryTree:
-    if node.type == "PROJECT" and node.childs and node.childs[0].type == "PROJECT":
-        current = node.childs[0]
-        
-        while current.childs and current.childs[0].type == "PROJECT":
-            current = current.childs[0]
-        
-        if current.childs:
-            node.childs = [current.childs[0]]
-            current.childs[0].parent = node
-        
-        return node
-    
-    return node
 
-# Aturan 4a: Distribusi seleksi terhadap join (kondisi hanya untuk satu tabel)
-# σθ₀(E₁⋈E₂) = (σθ₀(E₁)) ⋈ E₂
-# WIP ini, masih bingung cara ambil atribut mana punya tabel siapa
-def push_selection_through_join_single(node: QueryTree) -> QueryTree:
-    if node.type != "SIGMA" or not node.childs or node.childs[0].type != "JOIN":
-        return node
-    
-    join_node = node.childs[0]
-    if len(join_node.childs) < 2:
-        return node
-    
-    left_table = join_node.childs[0]
-    right_table = join_node.childs[1]
-    
+def _get_limit(q):
+    m = re.search(r"\bLIMIT\s+(\d+)", q, flags=re.IGNORECASE)
+    return int(m.group(1)) if m else None
 
-    #masih kayak gini
-    left_tables = _tables_under(left_table)
-    right_tables = _tables_under(right_table)
-    condition = node.val
-    belongs_to_left = any(table in condition for table in left_tables)
-    belongs_to_right = any(table in condition for table in right_tables)
-    
-    if belongs_to_left and not belongs_to_right:
-        sigma_left = QueryTree("SIGMA", condition)
-        sigma_left.add_child(left_table)
-        
-        join_node.childs[0] = sigma_left
-        sigma_left.parent = join_node
-        
 
-        if node.parent:
-            node.parent.replace_child(node, join_node)
-            join_node.parent = node.parent
-        else:
-            join_node.parent = None
-        
-        return join_node
-    
-    elif belongs_to_right and not belongs_to_left:
-        sigma_right = QueryTree("SIGMA", condition)
-        sigma_right.add_child(right_table)
-        
-        join_node.childs[1] = sigma_right
-        sigma_right.parent = join_node
-        
-        if node.parent:
-            node.parent.replace_child(node, join_node)
-            join_node.parent = node.parent
-        else:
-            join_node.parent = None
-        
-        return join_node
-    
-    return node
+def _get_column_from_order_by(q):
+    m = re.search(r"ORDER BY\s+(.+)", q, flags=re.IGNORECASE)
+    return m.group(1).strip() if m else None
 
-# Aturan 4b: Distribusi seleksi terhadap join (kondisi untuk kedua tabel)
-# σ(θ₁∧θ₂)(E₁⋈E₂) = (σθ₁(E₁)) ⋈ (σθ₂(E₂))
-# sama masih WIP
-def push_selection_through_join_split(node: QueryTree) -> QueryTree:
-    if node.type != "SIGMA" or not node.childs or node.childs[0].type != "JOIN":
-        return node
-    
-    if " AND " not in node.val.upper():
-        return node
-    
-    join_node = node.childs[0]
-    if len(join_node.childs) < 2:
-        return node
-    
-    left_table = join_node.childs[0]
-    right_table = join_node.childs[1]
-    
-    left_tables = _tables_under(left_table)
-    right_tables = _tables_under(right_table)
-    
-    conditions = re.split(r'\s+AND\s+', node.val, flags=re.IGNORECASE)
-    
-    left_conditions = []
-    right_conditions = []
-    mixed_conditions = []
-    
-    for cond in conditions:
-        belongs_to_left = any(table in cond for table in left_tables)
-        belongs_to_right = any(table in cond for table in right_tables)
-        
-        if belongs_to_left and not belongs_to_right:
-            left_conditions.append(cond.strip())
-        elif belongs_to_right and not belongs_to_left:
-            right_conditions.append(cond.strip())
-        else:
-            mixed_conditions.append(cond.strip())
-    
-    if left_conditions or right_conditions:
-        if left_conditions:
-            left_cond = " AND ".join(left_conditions)
-            sigma_left = QueryTree("SIGMA", left_cond)
-            sigma_left.add_child(left_table)
-            join_node.childs[0] = sigma_left
-            sigma_left.parent = join_node
-        
-        if right_conditions:
-            right_cond = " AND ".join(right_conditions)
-            sigma_right = QueryTree("SIGMA", right_cond)
-            sigma_right.add_child(right_table)
-            join_node.childs[1] = sigma_right
-            sigma_right.parent = join_node
-        
-        if mixed_conditions:
-            node.val = " AND ".join(mixed_conditions)
-            return node
-        else:
-            if node.parent:
-                node.parent.replace_child(node, join_node)
-                join_node.parent = node.parent
-            else:
-                join_node.parent = None
-            return join_node
-    
-    return node
 
-# Aturan 5a: Distribusi proyeksi terhadap join (simple case)
-# ΠL₁∪L₂(E₁⋈E₂) = (ΠL₁(E₁)) ⋈ (ΠL₂(E₂))
-def push_projection_through_join_simple(node: QueryTree) -> QueryTree:
-    if node.type != "PROJECT" or not node.childs or node.childs[0].type != "JOIN":
-        return node
-    
-    join_node = node.childs[0]
-    if len(join_node.childs) < 2:
-        return node
-    
-    left_table = join_node.childs[0]
-    right_table = join_node.childs[1]
-    
-    left_tables = _tables_under(left_table)
-    right_tables = _tables_under(right_table)
-    
-    proj_cols = [c.strip() for c in node.val.split(",")]
-    
-    left_cols = []
-    right_cols = []
-    
-    for col in proj_cols:
-        belongs_to_left = any(table in col for table in left_tables)
-        belongs_to_right = any(table in col for table in right_tables)
-        
-        if belongs_to_left:
-            left_cols.append(col)
-        if belongs_to_right:
-            right_cols.append(col)
-    
-    if left_cols and right_cols:
-        if left_cols:
-            left_proj = QueryTree("PROJECT", ", ".join(left_cols))
-            left_proj.add_child(left_table)
-            join_node.childs[0] = left_proj
-            left_proj.parent = join_node
-        
-        if right_cols:
-            right_proj = QueryTree("PROJECT", ", ".join(right_cols))
-            right_proj.add_child(right_table)
-            join_node.childs[1] = right_proj
-            right_proj.parent = join_node
-        
-        if node.parent:
-            node.parent.replace_child(node, join_node)
-            join_node.parent = node.parent
-        else:
-            join_node.parent = None
-        
-        return join_node
-    
-    return node
+def _get_column_from_group_by(q):
+    m = re.search(r"GROUP BY\s+(.+)", q, flags=re.IGNORECASE)
+    return m.group(1).strip() if m else None
 
-# Aturan 5b: Distribusi proyeksi terhadap join (dengan atribut join)
-# ΠL₁∪L₂(E₁⋈θE₂) = ΠL₁∪L₂((ΠL₁∪L₃(E₁)) ⋈θ (ΠL₂∪L₄(E₂)))
-def push_projection_through_join_with_join_attrs(node: QueryTree) -> QueryTree:
-    if node.type != "PROJECT" or not node.childs or node.childs[0].type != "JOIN":
-        return node
-    
-    join_node = node.childs[0]
-    if len(join_node.childs) < 2:
-        return node
-    
-    if not _is_theta(join_node):
-        return node
-    
-    left_table = join_node.childs[0]
-    right_table = join_node.childs[1]
-    
 
-    left_tables = _tables_under(left_table)
-    right_tables = _tables_under(right_table)
-    
-    proj_cols = [c.strip() for c in node.val.split(",")]
-    
+def _extract_set_conditions(q):
+    m = re.search(r"SET\s+(.+?)\s+WHERE", q, flags=re.IGNORECASE | re.DOTALL)
+    if not m:
+        m = re.search(r"SET\s+(.+)", q, flags=re.IGNORECASE | re.DOTALL)
+    if not m: return []
+    return [x.strip() for x in m.group(1).split(",")]
 
-    theta_condition = _theta_pred(join_node)
-    join_attrs = _extract_attributes_from_condition(theta_condition)
-    
-    left_cols = []
-    right_cols = []
-    left_join_attrs = []
-    right_join_attrs = []
-    
-    for col in proj_cols:
-        belongs_to_left = any(table in col for table in left_tables)
-        belongs_to_right = any(table in col for table in right_tables)
-        
-        if belongs_to_left:
-            left_cols.append(col)
-        if belongs_to_right:
-            right_cols.append(col)
-    
-    for attr in join_attrs:
-        belongs_to_left = any(table in attr for table in left_tables)
-        belongs_to_right = any(table in attr for table in right_tables)
-        
-        if belongs_to_left and attr not in left_cols:
-            left_join_attrs.append(attr)
-        if belongs_to_right and attr not in right_cols:
-            right_join_attrs.append(attr)
-    
-    if left_cols or right_cols:
-        # Left projection
-        left_all = left_cols + left_join_attrs
-        if left_all:
-            left_proj = QueryTree("PROJECT", ", ".join(left_all))
-            left_proj.add_child(left_table)
-            join_node.childs[0] = left_proj
-            left_proj.parent = join_node
-        
-        # Right projection
-        right_all = right_cols + right_join_attrs
-        if right_all:
-            right_proj = QueryTree("PROJECT", ", ".join(right_all))
-            right_proj.add_child(right_table)
-            join_node.childs[1] = right_proj
-            right_proj.parent = join_node
-        
-        return node
-    
-    return node
 
-# HELPER SEMENTARA
-def _extract_attributes_from_condition(condition: str) -> list:
-    if not condition:
-        return []
-    
-    pattern = r'\b\w+\.\w+\b'
-    matches = re.findall(pattern, condition)
-    return matches
+def _extract_table_update(q):
+    m = re.search(r"UPDATE\s+(\w+)", q, flags=re.IGNORECASE)
+    return m.group(1) if m else None
 
-def validate_query(query: str) -> tuple:
 
-    query = query.strip()
-    
-    # Check semicolon
-    if not query.endswith(";"):
-        return False, "Query must end with a semicolon."
-    
-    q_clean = query.rstrip(';').strip()
-    if not q_clean:
-        return False, "Query is empty."
-    
-    
-    # SELECT pattern 
-    select_pattern = re.compile(
-        r'^\s*SELECT\s+.+?\s+FROM\s+.+?' 
-        r'(\s+JOIN\s+.+?\s+ON\s+.+?)?'
-        r'(\s+NATURAL\s+JOIN\s+.+?)?'
-        r'(\s+WHERE\s+.+?)?' 
-        r'(\s+GROUP\s+BY\s+.+?)?'
-        r'(\s+ORDER\s+BY\s+.+?)?'
-        r'(\s+LIMIT\s+\d+)?' 
-        r'\s*;$',
-        re.IGNORECASE | re.DOTALL
-    )
-    
-    # Other query patterns
-    other_patterns = {
-        "UPDATE": re.compile(
-            r'^\s*UPDATE\s+\w+\s+SET\s+.+?(\s+WHERE\s+.+?)?\s*;$',
-            re.IGNORECASE | re.DOTALL
-        ),
-        "DELETE": re.compile(
-            r'^\s*DELETE\s+FROM\s+\w+(\s+WHERE\s+.+?)?\s*;$',
-            re.IGNORECASE
-        ),
-        "INSERT": re.compile(
-            r'^\s*INSERT\s+INTO\s+\w+\s*\(.+?\)\s+VALUES\s*\(.+?\)\s*;$',
-            re.IGNORECASE
-        ),
-        "CREATE": re.compile(
-            r'^\s*CREATE\s+TABLE\s+\w+\s*\(.+?\)\s*;$',
-            re.IGNORECASE | re.DOTALL
-        ),
-        "DROP": re.compile(
-            r'^\s*DROP\s+TABLE\s+\w+\s*(CASCADE|RESTRICT)?\s*;$',
-            re.IGNORECASE
-        ),
-        "BEGIN": re.compile(
-            r'^\s*BEGIN\s+TRANSACTION\s*;$',
-            re.IGNORECASE
-        ),
-        "COMMIT": re.compile(
-            r'^\s*COMMIT\s*;$',
-            re.IGNORECASE
-        ),
-        "ROLLBACK": re.compile(
-            r'^\s*ROLLBACK\s*;$',
-            re.IGNORECASE
-        )
-    }
-    
-    # Detect query type
-    query_type = q_clean.split(maxsplit=1)[0].upper()
-    
-    # Validate SELECT query
-    if query_type == "SELECT":
-        if select_pattern.match(query):
-            # Check clause order
-            clause_order = ["WHERE", "GROUP BY", "ORDER BY", "LIMIT"]
-            last_seen_index = -1
-            
-            for clause in clause_order:
-                # Handle multi-word clauses
-                if clause == "GROUP BY":
-                    clause_pos = query.upper().find("GROUP BY")
-                elif clause == "ORDER BY":
-                    clause_pos = query.upper().find("ORDER BY")
-                else:
-                    clause_pos = query.upper().find(clause)
-                    
-                if clause_pos != -1:
-                    if clause_pos < last_seen_index:
-                        return False, f"Invalid clause order: {clause} appears out of sequence."
-                    last_seen_index = clause_pos
-            
-            return True, "Valid SELECT query."
-        else:
-            return False, "Invalid SELECT query syntax."
-    
-    # Validate other query types
-    if query_type in other_patterns:
-        if other_patterns[query_type].match(query):
-            return True, f"Valid {query_type} query."
-        else:
-            return False, f"Invalid {query_type} query syntax."
-    
-    return False, f"Unsupported query type: {query_type}"
+def _extract_table_delete(q):
+    m = re.search(r"DELETE\s+FROM\s+(\w+)", q, flags=re.IGNORECASE)
+    return m.group(1) if m else None
 
-# SELECT Helpers
-def _get_columns_from_select(query: str) -> str:
-    q_upper = query.upper()
-    select_idx = q_upper.find("SELECT") + 6
-    from_idx = q_upper.find("FROM")
-    
-    if from_idx == -1:
-        columns = query[select_idx:].strip()
-    else:
-        columns = query[select_idx:from_idx].strip()
-    
-    return columns
 
-def _get_from_table(query: str) -> str:
-    q_upper = query.upper()
-    from_idx = q_upper.find("FROM") + 4
-    
-    # Find next keyword
-    end_keywords = ["WHERE", "GROUP BY", "ORDER BY", "LIMIT"]
-    end_idx = len(query)
-    
-    for keyword in end_keywords:
-        if keyword == "GROUP BY":
-            idx = q_upper.find("GROUP BY", from_idx)
-        elif keyword == "ORDER BY":
-            idx = q_upper.find("ORDER BY", from_idx)
-        else:
-            idx = q_upper.find(keyword, from_idx)
-        
-        if idx != -1 and idx < end_idx:
-            end_idx = idx
-    
-    return query[from_idx:end_idx].strip()
+def _extract_table_insert(q):
+    m = re.search(r"INSERT\s+INTO\s+(\w+)", q, flags=re.IGNORECASE)
+    return m.group(1) if m else None
 
-def _get_condition_from_where(query: str) -> str:
-    q_upper = query.upper()
-    where_idx = q_upper.find("WHERE")
-    
-    if where_idx == -1:
-        return ""
-    
-    where_idx += 5  # len("WHERE")
-    
-    # Find next keyword
-    end_keywords = ["GROUP BY", "ORDER BY", "LIMIT"]
-    end_idx = len(query)
-    
-    for keyword in end_keywords:
-        if keyword == "GROUP BY":
-            idx = q_upper.find("GROUP BY", where_idx)
-        elif keyword == "ORDER BY":
-            idx = q_upper.find("ORDER BY", where_idx)
-        else:
-            idx = q_upper.find(keyword, where_idx)
-        
-        if idx != -1 and idx < end_idx:
-            end_idx = idx
-    
-    return query[where_idx:end_idx].strip()
 
-def _get_limit(query: str) -> int:
-    q_upper = query.upper()
-    limit_idx = q_upper.find("LIMIT") + 5
-    
-    limit_str = query[limit_idx:].strip().split()[0]
-    return int(limit_str)
+def _extract_columns_insert(q):
+    m = re.search(r"\((.*?)\)", q)
+    return [x.strip() for x in m.group(1).split(",")] if m else []
 
-def _get_info_from_order_by(query: str) -> str: # new: ASC and DESC
-    q_upper = query.upper()
-    order_idx = q_upper.find("ORDER BY") + 8
-    
-    # Find next keyword
-    end_keywords = ["LIMIT"]
-    end_idx = len(query)
-    
-    for keyword in end_keywords:
-        idx = q_upper.find(keyword, order_idx)
-        if idx != -1:
-            end_idx = idx
-            break
-    
-    order_clause = query[order_idx:end_idx].strip()
-    
-    # Check for DESC/ASC
-    if "DESC" in order_clause.upper():
-        return order_clause
-    elif "ASC" in order_clause.upper():
-        return order_clause
-    else:
-        # Default to ASC
-        return f"{order_clause} ASC"
 
-def _get_column_from_group_by(query: str) -> str:
-    q_upper = query.upper()
-    group_idx = q_upper.find("GROUP BY") + 8
-    
-    # Find next keyword
-    end_keywords = ["ORDER BY", "LIMIT"]
-    end_idx = len(query)
-    
-    for keyword in end_keywords:
-        if keyword == "ORDER BY":
-            idx = q_upper.find("ORDER BY", group_idx)
-        else:
-            idx = q_upper.find(keyword, group_idx)
-        
-        if idx != -1:
-            end_idx = idx
-            break
-    
-    return query[group_idx:end_idx].strip()
+def _extract_values_insert(q):
+    m = re.search(r"VALUES\s*\((.*?)\)", q, flags=re.IGNORECASE)
+    return [x.strip() for x in m.group(1).split(",")] if m else []
 
-def _parse_from_clause(query: str) -> QueryTree:
-    from_tables = _get_from_table(query)
-    q_upper = from_tables.upper()
-    
-    # Case 1: NATURAL JOIN
-    if "NATURAL JOIN" in q_upper:
-        join_split = re.split(r'\s+NATURAL\s+JOIN\s+', from_tables, flags=re.IGNORECASE)
-        
-        # Parse first table (may have alias)
-        left_table = _parse_table_with_alias(join_split[0].strip())
-        
-        # Chain NATURAL JOIN nodes
-        for right_table_str in join_split[1:]:
-            right_table = _parse_table_with_alias(right_table_str.strip())
-            
-            join_node = QueryTree(type="JOIN", val="NATURAL")
-            join_node.add_child(left_table)
-            join_node.add_child(right_table)
-            left_table = join_node
-        
-        return left_table
-    
-    # Case 2: Regular JOIN with ON
-    elif "JOIN" in q_upper and "ON" in q_upper:
-        join_split = re.split(r'\s+JOIN\s+', from_tables, flags=re.IGNORECASE)
-        
-        # Parse first table (may have alias)
-        left_table = _parse_table_with_alias(join_split[0].strip())
-        
-        # Process each JOIN
-        for join_part in join_split[1:]:
-            temp = re.split(r'\s+ON\s+', join_part, flags=re.IGNORECASE)
-            right_table_str = temp[0].strip()
-            join_condition = temp[1].strip() if len(temp) > 1 else ""
-            
-            # Parse right table (may have alias)
-            right_table = _parse_table_with_alias(right_table_str)
-            
-            # Clean condition
-            join_condition = join_condition.replace("(", "").replace(")", "")
-            
-            # Create JOIN node with THETA format
-            join_node = QueryTree(type="JOIN", val=f"THETA:{join_condition}")
-            join_node.add_child(left_table)
-            join_node.add_child(right_table)
-            left_table = join_node
-        
-        return left_table
-    
-    # Case 3: Comma-separated tables (Cartesian product)
-    elif "," in from_tables:
-        tables = [t.strip() for t in from_tables.split(",")]
-        
-        # Parse first table (may have alias)
-        left_table = _parse_table_with_alias(tables[0])
-        
-        # Chain CARTESIAN JOIN nodes
-        for table_str in tables[1:]:
-            right_table = _parse_table_with_alias(table_str)
-            
-            join_node = QueryTree(type="JOIN", val="CARTESIAN")
-            join_node.add_child(left_table)
-            join_node.add_child(right_table)
-            left_table = join_node
-        
-        return left_table
-    
-    # Case 4: Single table (may have alias)
-    else:
-        return _parse_table_with_alias(from_tables.strip())
 
-def _parse_table_with_alias (table_str: str) -> QueryTree:
-    # Check for AS keyword
-    if " AS " in table_str.upper():
-        parts = re.split(r'\s+AS\s+', table_str, flags=re.IGNORECASE)
-        table_name = parts[0].strip()
-        alias = parts[1].strip()
-        # Store as "table_name AS alias"
-        return QueryTree(type="TABLE", val=f"{table_name} AS {alias}")
-    else:
-        # No alias, just table name
-        return QueryTree(type="TABLE", val=table_str)
+def _parse_drop_table(q):
+    m = re.search(r"DROP\s+TABLE\s+(\w+)", q, flags=re.IGNORECASE)
+    return m.group(1) if m else None
 
-## UPDATE Helpers
-def _extract_set_conditions(query: str) -> list:
-    q_upper = query.upper()
-    set_idx = q_upper.find("SET") + 3
-    where_idx = q_upper.find("WHERE")
-    
-    if where_idx == -1:
-        set_part = query[set_idx:].strip()
-    else:
-        set_part = query[set_idx:where_idx].strip()
-    
-    # Split by comma
-    conditions = [c.strip() for c in set_part.split(",")]
-    return conditions
 
-def _extract_table_update(query: str) -> str:
-    q_upper = query.upper()
-    update_idx = q_upper.find("UPDATE") + 6
-    set_idx = q_upper.find("SET")
-    
-    return query[update_idx:set_idx].strip()
+def _parse_create_table(q):
+    m = re.search(r"CREATE\s+TABLE\s+(\w+)\s*\((.+)\)", q,
+                  flags=re.IGNORECASE | re.DOTALL)
+    if not m: return ""
+    table = m.group(1)
+    defs = m.group(2)
+    return f"{table}|{defs}"
 
-## DELETE Helpers
-def _extract_table_delete(query: str) -> str:
-    q_upper = query.upper()
-    from_idx = q_upper.find("FROM") + 4
-    where_idx = q_upper.find("WHERE")
-    
-    if where_idx == -1:
-        return query[from_idx:].strip()
-    else:
-        return query[from_idx:where_idx].strip()
 
-## INSERT Helpers
-def _extract_table_insert(query: str) -> str:
-    q_upper = query.upper()
-    into_idx = q_upper.find("INTO") + 4
-    
-    # Find opening parenthesis for columns
-    paren_idx = query.find("(", into_idx)
-    
-    return query[into_idx:paren_idx].strip()
-
-def _extract_columns_insert(query: str) -> str:
-    # Find first parenthesis (columns)
-    start_idx = query.find("(")
-    end_idx = query.find(")", start_idx)
-    
-    columns = query[start_idx:end_idx+1]  # Include parentheses
-    return columns
-
-def _extract_values_insert(query: str) -> str:
-    q_upper = query.upper()
-    values_idx = q_upper.find("VALUES")
-    
-    if values_idx == -1:
-        raise Exception("INSERT query must contain VALUES clause")
-    
-    # Find parenthesis after VALUES
-    start_idx = query.find("(", values_idx)
-    end_idx = query.find(")", start_idx)
-    
-    values = query[start_idx:end_idx+1]  # Include parentheses
-    return values
-
-def _get_column_from_order_by(query: str) -> str:
-    q_upper = query.upper()
-    order_idx = q_upper.find("ORDER BY") + 8
-    
-    end_keywords = ["LIMIT"]
-    end_idx = len(query)
-    
-    for keyword in end_keywords:
-        idx = q_upper.find(keyword, order_idx)
-        if idx != -1:
-            end_idx = idx
-            break
-    
-    order_clause = query[order_idx:end_idx].strip()
-    
-    # Default ASC jika tidak disebutkan
-    if "DESC" in order_clause.upper():
-        return order_clause  # e.g., "salary DESC"
-    elif "ASC" in order_clause.upper():
-        return order_clause  # e.g., "salary ASC"
-    else:
-        return f"{order_clause} ASC"  # default
-
-def _get_order_by_info(query: str) -> str:
-    q_upper = query.upper()
-    order_idx = q_upper.find("ORDER BY") + 8
-    
-    # Find next keyword
-    end_keywords = ["LIMIT"]
-    end_idx = len(query)
-    
-    for keyword in end_keywords:
-        idx = q_upper.find(keyword, order_idx)
-        if idx != -1:
-            end_idx = idx
-            break
-    
-    order_clause = query[order_idx:end_idx].strip()
-    
-    # Check for DESC/ASC
-    if "DESC" in order_clause.upper():
-        return order_clause
-    elif "ASC" in order_clause.upper():
-        return order_clause
-    else:
-        # Default to ASC
-        return f"{order_clause} ASC"
-    
-def _parse_drop_table(query: str) -> str:
-    q_upper = query.upper()
-    
-    drop_idx = q_upper.find("DROP TABLE") + 10
-    table_part = query[drop_idx:].strip().rstrip(';').strip()
-    
-    # Check for CASCADE or RESTRICT
-    mode = "RESTRICT"  # default
-    
-    if "CASCADE" in table_part.upper():
-        mode = "CASCADE"
-        table_name = table_part[:table_part.upper().find("CASCADE")].strip()
-    elif "RESTRICT" in table_part.upper():
-        mode = "RESTRICT"
-        table_name = table_part[:table_part.upper().find("RESTRICT")].strip()
-    else:
-        table_name = table_part
-    
-    return f"{table_name}|{mode}"
-
-def _parse_create_table(query: str) -> str:
-    q_upper = query.upper()
-    
-    # Extract table name
-    create_idx = q_upper.find("CREATE TABLE") + 12
-    paren_idx = query.find("(", create_idx)
-    table_name = query[create_idx:paren_idx].strip()
-    
-    # Extract content inside parentheses
-    content_start = paren_idx + 1
-    content_end = query.rfind(")")
-    content = query[content_start:content_end].strip()
-    
-    # Split by comma (careful with nested parens)
-    parts = []
-    current_part = ""
-    paren_depth = 0
-    
-    for char in content:
-        if char == '(':
-            paren_depth += 1
-            current_part += char
-        elif char == ')':
-            paren_depth -= 1
-            current_part += char
-        elif char == ',' and paren_depth == 0:
-            parts.append(current_part.strip())
-            current_part = ""
-        else:
-            current_part += char
-    
-    if current_part.strip():
-        parts.append(current_part.strip())
-    
-    # Parse each part
-    columns = []
-    primary_key = []
-    foreign_keys = []
-    
-    for part in parts:
-        part_upper = part.upper()
-        
-        if part_upper.startswith("PRIMARY KEY"):
-            # Extract column(s): PRIMARY KEY(col1, col2)
-            pk_content = part[part.find("(")+1:part.find(")")].strip()
-            primary_key = [c.strip() for c in pk_content.split(",")]
-        
-        elif part_upper.startswith("FOREIGN KEY"):
-            # FOREIGN KEY(col) REFERENCES table(ref_col)
-            fk_match = re.match(
-                r'FOREIGN\s+KEY\s*\((\w+)\)\s+REFERENCES\s+(\w+)\s*\((\w+)\)',
-                part,
-                re.IGNORECASE
-            )
-            if fk_match:
-                foreign_keys.append(
-                    f"{fk_match.group(1)}:{fk_match.group(2)}:{fk_match.group(3)}"
-                )
-        
-        else:
-            # Regular column: col_name type [size]
-            tokens = part.split()
-            if len(tokens) >= 2:
-                col_name = tokens[0]
-                col_type = tokens[1].lower()
-                
-                # Extract size: CHAR(10) or VARCHAR(255)
-                size = ""
-                if "(" in col_type:
-                    type_match = re.match(r'(\w+)\((\d+)\)', col_type)
-                    if type_match:
-                        col_type = type_match.group(1)
-                        size = type_match.group(2)
-                
-                columns.append(f"{col_name}:{col_type}:{size}")
-    
-    # Build result
-    columns_str = ",".join(columns)
-    pks_str = ",".join(primary_key)
-    fks_str = ",".join(foreign_keys)
-    
-    return f"{table_name}|{columns_str}|{pks_str}|{fks_str}"
+def _get_order_by_info(q):
+    m = re.search(r"ORDER BY\s+(.+)$", q, flags=re.IGNORECASE)
+    return m.group(1).strip() if m else ""
