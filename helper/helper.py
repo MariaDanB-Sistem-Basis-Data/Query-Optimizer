@@ -212,27 +212,54 @@ def choose_best(plans, stats: dict) -> QueryTree:
     return best
 
 def build_join_tree(order, join_conditions: dict = None) -> QueryTree:
-    """order: ['A','B','C']
-       join_conditions: {frozenset({'A','B'}): 'A.x=B.y', ...}
-       Buat left-deep: (((A ⋈ B) ⋈ C) ...)
-       Gunakan THETA jika ada predicate, selain itu CARTESIAN."""
     if join_conditions is None:
         join_conditions = {}
-    
+
     if not order:
         return None
-    
+
     cur = QueryTree("TABLE", order[0])
     for i in range(1, len(order)):
         name = order[i]
         right = QueryTree("TABLE", name)
-        # cari predicate join
-        key = frozenset({order[0], name})
+
+        # find representative table name for left subtree
+        try:
+            cur_table = _first_table(cur)
+        except Exception:
+            cur_table = order[0]
+
+        next_table = name
+
+        # direct key lookup
+        key = frozenset({cur_table, next_table})
         pred = join_conditions.get(key, "")
+
+        # if not found, try any table in left subtree paired with next_table
+        if not pred:
+            left_tables = list(_tables_under(cur))
+            for lt in left_tables:
+                k2 = frozenset({lt, next_table})
+                if k2 in join_conditions:
+                    pred = join_conditions[k2]
+                    break
+
+        # if still not found, try symmetrical: any table in right subtree vs any in left
+        if not pred:
+            for jt_key in join_conditions.keys():
+                try:
+                    if isinstance(jt_key, (set, frozenset)) and next_table in jt_key:
+                        if any(lt in jt_key for lt in list(_tables_under(cur))):
+                            pred = join_conditions[jt_key]
+                            break
+                except Exception:
+                    continue
+
         val = _mk_theta(pred) if pred else "CARTESIAN"
         cur = QueryTree("JOIN", val, [cur, right])
         cur.childs[0].parent = cur
         right.parent = cur
+
     return cur
 
 def _first_table(node: QueryTree) -> str:

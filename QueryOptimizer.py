@@ -52,7 +52,8 @@ from helper.helper import (
     parse_group_by_string,
     parse_insert_columns_string,
     parse_insert_values_string,
-    _parse_column_reference
+    _parse_column_reference,
+    _theta_pred
 )
 
 from helper.stats import get_stats
@@ -263,66 +264,60 @@ class OptimizationEngine:
         return parse_result
 
     def optimize_query(self, parsed_query: ParsedQuery) -> ParsedQuery:
+        if not parsed_query or not parsed_query.query_tree:
+            return parsed_query
+
+        # 1) START WITH ORIGINAL ROOT
         root = parsed_query.query_tree
 
-        # aturan logis
+        # 2) APPLY NON-JOIN RULES (push-down & simplify)
+        # do fixed-point iterations
+        changed = True
+        max_iter = 5
+        while changed and max_iter > 0:
+            prev = repr(root)
+            # recursive application
+            root = self._apply_non_join_rules(root)
+            changed = (repr(root) != prev)
+            max_iter -= 1
+
+        # 3) APPLY JOIN RULES (fold selection, assoc, commutative)
         root = fold_selection_with_cartesian(root)
         root = merge_selection_into_join(root)
         root = make_join_commutative(root)
         root = associate_natural_join(root)
         root = associate_theta_join(root)
 
-        # ekstrak tabel dari query tree
-        tables = list(_tables_under(root))
-        
-        # jika hanya 1 tabel atau tidak ada join, return as is
+        # 4) TABLE EXTRACTION
+        tables = list(_tables_under(root)) if root else []
         if len(tables) <= 1:
             return ParsedQuery(parsed_query.query, root)
-        
-        # generate beberapa kandidat urutan join
-        orders = _some_permutations(tables, max_count=5)
-        
-        # map kondisi join (untuk saat ini kosong, bisa diperluas)
-        join_conditions = {}
-        
-        # build join trees untuk setiap urutan
+
+        # 5) BUILD JOIN CONDITIONS FROM CURRENT TREE
+        join_conditions = self._extract_join_conditions_from_tree(root)
+
+        # 6) ORDER ENUMERATION & PLAN GENERATION
+        orders = _some_permutations(tables, max_count=10)
         plans = []
         for order in orders:
             plan = build_join_tree(order, join_conditions)
             if plan:
                 plans.append(plan)
-        
-        # jika tidak ada plan yang dihasilkan, return root asli
+
         if not plans:
             return ParsedQuery(parsed_query.query, root)
-        
-        # pilih plan terbaik berdasarkan cost
+
+        # 7) COST MODEL: PICK BEST PLAN
         stats = get_stats()
         best = choose_best(plans, stats)
 
+        # 8) RETURN BEST PLAN AS FINAL OPTIMIZED QUERY TREE
         return ParsedQuery(parsed_query.query, best)
 
     def get_cost(self, parsed_query: ParsedQuery) -> int:
         root = parsed_query.query_tree
         stats = get_stats()
         return plan_cost(root, stats)
-    
-    def optimize_query_non_join(self, pq: ParsedQuery) -> ParsedQuery:
-        if not pq or not pq.query_tree:
-            return pq
-        
-        root = pq.query_tree
-        # nyobain aja max iterasi 5
-        max_iterations = 5
-        for _ in range(max_iterations):
-            old_root = root
-            
-            root = self._apply_non_join_rules(root)
-            
-            if root == old_root:
-                break
-        
-        return ParsedQuery(pq.query, root)
     
     def _apply_non_join_rules(self, node: QueryTree) -> QueryTree:
         if not node:
@@ -341,3 +336,51 @@ class OptimizationEngine:
         node = push_projection_through_join_with_join_attrs(node)
         
         return node
+    
+    def _extract_join_conditions_from_tree(self, node: QueryTree) -> dict:
+        mapping = {}
+
+        def walk(n):
+            if n is None:
+                return
+
+            if n.type == "JOIN":
+                pred = ""
+
+                # coba ambil menggunakan _theta_pred
+                try:
+                    pred = _theta_pred(n)
+                except:
+                    pred = ""
+
+                # fallback
+                if not pred:
+                    if hasattr(n.val, "condition"):
+                        pred = str(n.val.condition)
+                    elif isinstance(n.val, str):
+                        s = n.val.strip()
+                        if s.upper().startswith("THETA:"):
+                            pred = s.split(":",1)[1].strip()
+                        elif s.upper() != "CARTESIAN":
+                            pred = s
+
+                if pred:
+                    left_list = list(_tables_under(n.childs[0]))
+                    right_list = list(_tables_under(n.childs[1]))
+
+                    if left_list and right_list:
+                        # pasangan utama
+                        key = frozenset({left_list[0], right_list[0]})
+                        mapping[key] = pred
+
+                        # pasangan tambahan (mencegah predicate hilang)
+                        for lt in left_list:
+                            for rt in right_list:
+                                mapping.setdefault(frozenset({lt, rt}), pred)
+
+            # recursive
+            for c in getattr(n, "childs", []):
+                walk(c)
+
+        walk(node)
+        return mapping
