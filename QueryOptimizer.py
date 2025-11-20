@@ -62,7 +62,6 @@ class OptimizationEngine:
     
     # parse sql query string dan return ParsedQuery object
     def parse_query(self, query: str) -> ParsedQuery:
-
         if not query:
             raise Exception("Query is empty")
         
@@ -76,7 +75,6 @@ class OptimizationEngine:
         
         try:
             if q.upper().startswith("SELECT"):
-                # Init nodes
                 current_root = None
                 last_node = None
                 
@@ -140,16 +138,8 @@ class OptimizationEngine:
                 
                 # 6. parse FROM
                 if last_node:
-                    if last_node.type == "OR":
-                        for child in last_node.childs:
-                            if child.type == "SIGMA":
-                                from_node_new = _parse_from_clause(q)
-                                child.add_child(from_node_new)
-                    
-                    else:
-                        from_node = _parse_from_clause(q)
-                        last_node.add_child(from_node)
-                
+                    from_node = _parse_from_clause(q)
+                    last_node.add_child(from_node)
                 else:
                     from_node = _parse_from_clause(q)
                     current_root = from_node
@@ -157,7 +147,6 @@ class OptimizationEngine:
                 parse_result.query_tree = current_root
           
             elif q.upper().startswith("UPDATE"):
-                # Init nodes
                 current_root = None
                 last_node = None
                 
@@ -198,7 +187,6 @@ class OptimizationEngine:
                 parse_result.query_tree = current_root
 
             elif q.upper().startswith("DELETE"):
-                # Init nodes
                 current_root = None
                 last_node = None
                 
@@ -224,14 +212,12 @@ class OptimizationEngine:
                 table_node = QueryTree(type="TABLE", val=table_ref)
                 
                 last_node.add_child(table_node)
-                
                 parse_result.query_tree = current_root
             
             elif q.upper().startswith("INSERT"):
-                # Parse components
                 table_name = _extract_table_insert(q)
-                columns = _extract_columns_insert(q)
-                values = _extract_values_insert(q)
+                columns_str = _extract_columns_insert(q)
+                values_str = _extract_values_insert(q)
                 
                 columns_list = parse_insert_columns_string(columns_str)
                 values_list = parse_insert_values_string(values_str)
@@ -271,6 +257,7 @@ class OptimizationEngine:
             
             else:
                 raise Exception(f"Unsupported query type: {q[:20]}")
+                
         except Exception as e:
             raise Exception(f"Error parsing query: {str(e)}")
         
