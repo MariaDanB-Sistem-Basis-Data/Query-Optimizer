@@ -328,6 +328,31 @@ class OptimizationEngine:
         return ParsedQuery(parsed_query.query, best)
 
     def get_cost(self, parsed_query: ParsedQuery) -> int:
+        if not parsed_query or not parsed_query.query_tree:
+            return 0
+        
+        # TODO: ==================== [UNCOMMENT SAAT INTEGRASI SM] ====================
+        # Uncomment blok di bawah untuk menggunakan StorageManager:
+        #
+        # try:
+        #     from StorageManager import StorageManager  # sesuaikan path SM
+        #     from helper.cost import CostPlanner
+        #     
+        #     # Inisialisasi StorageManager
+        #     storage_manager = StorageManager(base_path='data')  # sesuaikan path data nya
+        #     
+        #     # Inisialisasi CostPlanner dengan SM
+        #     cost_planner = CostPlanner(storage_manager=storage_manager)
+        #     
+        #     # Return cost dari CostPlanner
+        #     return cost_planner.get_cost(parsed_query)
+        # 
+        # except ImportError:
+        #     # Fallback ke dummy stats jika SM tidak tersedia
+        #     pass
+        # ===========================================================================
+        
+        # ini nanti hapus aja setelah integrasi SM
         root = parsed_query.query_tree
         stats = get_stats()
         return plan_cost(root, stats)

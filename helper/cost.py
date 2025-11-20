@@ -28,14 +28,17 @@ class CostPlanner:
     
     def get_table_stats(self, table_name: str) -> dict:
         """
-        Mendapatkan statistik tabel dari Storage Manager atau temporary cache.
-        Return: dict dengan keys: n_r, b_r, l_r, f_r, v_a_r
+        mendapatkan statistik tabel dari storage manager atau temporary cache.
+        parameter:
+            table_name (str): nama tabel yang akan diambil statistiknya
+        return:
+            dict: {'n_r': int, 'b_r': int, 'l_r': int, 'f_r': int, 'v_a_r': dict}
         
-        ============================================================
-        INTEGRASI DENGAN SM: Ketika SM ready, HAPUS semua 
-        bagian yang ditandai [HAPUS SAAT INTEGRASI] dan 
-        UNCOMMENT bagian [UNCOMMENT SAAT INTEGRASI]
-        ============================================================
+        dipanggil oleh:
+            cost_table_scan
+        
+        integrasi dengan SM: hapus bagian [HAPUS SAAT INTEGRASI] 
+        dan uncomment bagian [UNCOMMENT SAAT INTEGRASI]
         """
         # Cek apakah ini temporary table (hasil join/selection)
         if table_name in self.temp_table_stats:
@@ -177,7 +180,20 @@ class CostPlanner:
     
     def store_temp_stats(self, table_id: str, n_r: int, b_r: int, f_r: int, v_a_r: dict):
         """
-        Menyimpan statistik untuk temporary table (hasil join, selection, dll)
+        menyimpan statistik untuk temporary table (hasil join, selection, dll).
+        
+        parameter:
+            table_id (str): identifier unik untuk temporary table
+            n_r (int): jumlah tuples
+            b_r (int): jumlah blocks
+            f_r (int): blocking factor
+            v_a_r (dict): distinct values per attribute
+        
+        return:
+            none
+        
+        dipanggil oleh:
+            cost_selection, cost_join
         """
         self.temp_table_stats[table_id] = {
             'n_r': n_r,
@@ -191,15 +207,22 @@ class CostPlanner:
     
     def _calculate_logical_node_selectivity(self, logical_node: LogicalNode, v_a_r: dict) -> float:
         """
-        Recursively calculate selectivity for a LogicalNode.
-        Handles nested AND/OR correctly.
+        menghitung selectivity untuk logical node secara rekursif.
+        mendukung nested and/or.
         
-        Args:
-            logical_node: LogicalNode to calculate selectivity for
-            v_a_r: Dictionary {attribute: distinct_count}
+        rumus:
+            - and: s1 * s2 * ... * sn (conjunction)
+            - or: 1 - (1-s1)*(1-s2)*...*(1-sn) (disjunction)
         
-        Returns:
-            float: Combined selectivity
+        parameter:
+            logical_node (LogicalNode): node dengan operator and/or
+            v_a_r (dict): {attribute: distinct_count}
+        
+        return:
+            float: combined selectivity (0.0 - 1.0)
+        
+        dipanggil oleh:
+            cost_selection
         """
         if logical_node.operator == "AND":
             # Conjunction: multiply selectivities
@@ -231,14 +254,17 @@ class CostPlanner:
     
     def _logical_node_to_string(self, logical_node: LogicalNode) -> str:
         """
-        Convert LogicalNode to string representation (for display).
-        Handles nested structure.
+        konversi logical node ke string untuk display.
+        mendukung nested structure.
         
-        Args:
-            logical_node: LogicalNode to convert
+        parameter:
+            logical_node (LogicalNode): node yang akan dikonversi
         
-        Returns:
-            str: String representation
+        return:
+            str: representasi string (contoh: "(age > 18 AND gpa > 3.0)")
+        
+        dipanggil oleh:
+            cost_selection
         """
         parts = []
         for child in logical_node.childs:
@@ -252,16 +278,16 @@ class CostPlanner:
     
     def _condition_node_to_string(self, cond_node: ConditionNode) -> str:
         """
-        Convert ConditionNode ke string representation untuk display.
+        konversi condition node ke string untuk display.
         
-        Args:
-            cond_node: ConditionNode untuk dikonversi
+        parameter:
+            cond_node (ConditionNode): node yang akan dikonversi
         
-        Returns:
-            str: String representation (e.g., 'age > 18', 'gpa = 3.5')
+        return:
+            str: representasi string (contoh: "age > 18", "gpa = 3.5")
         
-        Called by:
-            - cost_selection() untuk display output
+        dipanggil oleh:
+            cost_selection
         """
         # Extract attribute
         if isinstance(cond_node.attr, ColumnNode):
@@ -285,22 +311,24 @@ class CostPlanner:
     
     def estimate_selectivity(self, condition: ConditionNode, v_a_r: dict = None) -> float:
         """
-        Estimasi selectivity dari kondisi selection menggunakan V(A,r).
+        estimasi selectivity dari kondisi selection menggunakan v(a,r).
         
-        Rumus dari slide "Size Estimation of Complex Selections":
-        - Equality (A = value): σ_A=v(r) → selectivity = 1/V(A,r)
-        - Inequality (A ≠ value): selectivity = 1 - (1/V(A,r))
-        - Comparison (A > value): selectivity ≈ 0.5 (tanpa histogram)
+        rumus:
+            - equality (a = value): selectivity = 1/v(a,r)
+            - inequality (a ≠ value): selectivity = 1 - (1/v(a,r))
+            - comparison (a > value): selectivity ≈ 0.5 (tanpa histogram)
+            - like: selectivity ≈ 0.2
+            - in: selectivity ≈ n/v(a,r) dimana n = jumlah values
         
-        Args:
-            condition: ConditionNode dengan attr (ColumnNode), op (str), value
-            v_a_r: Dictionary {attribute: distinct_count} dari tabel
+        parameter:
+            condition (ConditionNode): node dengan attr, op, value
+            v_a_r (dict): {attribute: distinct_count} dari tabel
         
-        Returns:
+        return:
             float: selectivity (0.0 - 1.0)
         
-        Called by:
-            - _calculate_logical_node_selectivity()
+        dipanggil oleh:
+            _calculate_logical_node_selectivity
         """
         if v_a_r is None:
             v_a_r = {}
@@ -360,11 +388,19 @@ class CostPlanner:
     
     def cost_table_scan(self, node: QueryTree) -> dict:
         """
-        Cost untuk full table scan.
+        cost untuk full table scan.
         
-        Rumus: Cost = b_r (jumlah blocks yang harus dibaca)
+        rumus:
+            cost = b_r (jumlah blocks yang harus dibaca)
         
-        Return: dict dengan cost, n_r (estimated tuples), dan b_r (blocks)
+        parameter:
+            node (QueryTree): node dengan type="TABLE"
+        
+        return:
+            dict: {cost, n_r, b_r, f_r, v_a_r, operation, description}
+        
+        dipanggil oleh:
+            calculate_cost
         """
         table_name = node.val
         stats = self.get_table_stats(table_name)
@@ -385,33 +421,27 @@ class CostPlanner:
     
     def cost_selection(self, node: QueryTree, input_cost: dict) -> dict:
         """
-        Cost untuk operasi SELECTION (σ - sigma).
+        cost untuk operasi selection (σ - sigma).
+        mendukung logical node (and/or) dan condition node.
         
-        Rumus dari slide "Selection Size Estimation":
-        - σ_A=v(r): output = n_r / V(A,r)
-        - σ_A≤v(r): output = n_r * selectivity (dengan histogram)
-        - Tanpa histogram: output = n_r / 2 (asumsi konservatif)
+        rumus:
+            - output tuples: n_r * selectivity
+            - output blocks: ceil(output_tuples / f_r)
+            - cost: cost(input) (tidak ada tambahan i/o)
+            - v(a, σ_θ(r)): min(v(a,r), n_r(output))
         
-        Cost = cost(input) (tidak ada tambahan I/O, hanya processing)
-        Output tuples: n_r * selectivity
-        Output blocks: ceil(output_tuples / f_r)
+        parameter:
+            node (QueryTree): node dengan type="SIGMA"
+            input_cost (dict): cost info dari child node
         
-        NEW: Support LogicalNode (AND/OR) dan ConditionNode
+        return:
+            dict: {cost, n_r, b_r, f_r, v_a_r, selectivity, operation, description}
         
-        Args:
-            node: QueryTree dengan type="SIGMA"
-            node.val: dapat berupa LogicalNode, ConditionNode, atau string (backward compat)
-            input_cost: Cost info dari child node
+        dipanggil oleh:
+            calculate_cost
         
-        Returns:
-            dict: Cost breakdown dengan n_r, b_r, v_a_r, selectivity
-        
-        Called by:
-            - calculate_cost()
-        
-        TODO: Implementasi index scan jika ada index (kalau SM ada info ketinggian Tree)
-        - Dengan B+-tree index: cost = h_i + (selectivity * b_r)
-        - h_i = tinggi tree
+        todo: implementasi index scan jika sm ada info tinggi tree
+              cost = h_i + (selectivity * b_r)
         """
         condition = node.val
         
@@ -478,18 +508,24 @@ class CostPlanner:
     
     def cost_projection(self, node: QueryTree, input_cost: dict) -> dict:
         """
-        Cost untuk operasi PROJECTION (Π - pi).
+        cost untuk operasi projection (π - pi).
         
-        Rumus dari slide "Size Estimation for Other Operations":
-        - Projection: estimated size of Π_A(r) = V(A,r)
-        - Jika tanpa DISTINCT: size = n_r (sama dengan input)
-        - Jika dengan DISTINCT: size = V(A,r)
+        rumus:
+            - tanpa distinct: size = n_r (sama dengan input)
+            - dengan distinct: size = v(a,r)
+            - cost: cost(input) (tidak ada tambahan i/o)
         
-        Cost = cost(input) (tidak ada tambahan I/O signifikan)
+        parameter:
+            node (QueryTree): node dengan type="PROJECT"
+            input_cost (dict): cost info dari child node
         
-        V(A,r) estimation:
-        - "They are the same in Π_A(r) as in r"
-        - Untuk projected attributes, V values tetap sama
+        return:
+            dict: {cost, n_r, b_r, f_r, v_a_r, operation, description}
+        
+        dipanggil oleh:
+            calculate_cost
+        
+        catatan: asumsi tidak ada distinct (belum diimplementasi)
         """
         columns = node.val
         
@@ -519,41 +555,36 @@ class CostPlanner:
     
     def cost_join(self, node: QueryTree, left_cost: dict, right_cost: dict) -> dict:
         """
-        Cost untuk operasi JOIN (⋈ - bowtie).
-        Menggunakan Nested-Loop Join sebagai default.
+        cost untuk operasi join (⋈ - bowtie).
+        menggunakan nested-loop join sebagai default.
         
-        === NESTED-LOOP JOIN ===
-        Rumus: Cost = b_r(R) + n_r(R) * b_r(S)
-        - Scan R sekali: b_r(R)
-        - Untuk setiap tuple di R, scan S: n_r(R) * b_r(S)
+        rumus nested-loop:
+            cost = b_r(r) + n_r(r) * b_r(s)
         
-        === ESTIMATION OF JOIN SIZE ===
-        Rumus dari slide "Estimation of the Size of Joins":
+        rumus estimasi join size:
+            - case 1 (no common): n_r(r ⋈ s) = n_r(r) * n_r(s)
+            - case 2 (key): n_r(r ⋈ s) ≤ n_r(s)
+            - case 3 (foreign key): n_r(r ⋈ s) = n_r(s) Note: s adalah table dengan foreign key
+            - case 4 (not key): n_r(r ⋈ s) = (n_r(r) * n_r(s)) / max(v(a,r), v(a,s))
         
-        Case 1: R ∩ S = ∅ (no common attributes)
-        - Cartesian product: n_r(R ⋈ S) = n_r(R) * n_r(S)
+        rumus v(a, r ⋈ s):
+            - jika a dari r: v(a, r⋈s) = min(v(a,r), n_r(r⋈s))
+            - jika a dari r dan s: gunakan formula kombinasi
         
-        Case 2: R ∩ S is a key for R
-        - A tuple of S joins with at most one tuple from R
-        - n_r(R ⋈ S) ≤ n_r(S)
+        parameter:
+            node (QueryTree): node dengan type="JOIN"
+            left_cost (dict): cost info dari left child
+            right_cost (dict): cost info dari right child
         
-        Case 3: R ∩ S is a foreign key in S referencing R
-        - n_r(R ⋈ S) = n_r(S) (exactly)
+        return:
+            dict: {cost, n_r, b_r, f_r, v_a_r, join_cost, operation, description}
         
-        Case 4: R ∩ S = {A} not a key for R or S
-        - Formula: n_r(R ⋈ S) = (n_r(R) * n_r(S)) / max(V(A,R), V(A,S))
-        - "Take the lower of these two estimates"
+        dipanggil oleh:
+            calculate_cost
         
-        === ESTIMATION OF V(A, R ⋈ S) ===
-        - If all attributes in A are from R:
-          V(A, R ⋈ S) = min(V(A,R), n_r(R⋈S))
-        - If A contains attributes from both R and S:
-          V(A, R⋈S) = min(V(A1,R)*V(A2-A1,S), V(A1-A2,R)*V(A2,S), n_r(R⋈S))
-        
-          
-        TODO: Implementasi Hash Join dan Sort-Merge Join
-        - Hash Join: 3 * (b_r(R) + b_r(S))
-        - Sort-Merge Join: b_r(R) + b_r(S) + sort_cost
+        todo: implementasi hash join dan sort-merge join
+              - hash join: 3 * (b_r(r) + b_r(s))
+              - sort-merge: b_r(r) + b_r(s) + sort_cost
         """
         left_n_r = left_cost.get("n_r", 1000)
         left_b_r = left_cost.get("b_r", 100)
@@ -640,18 +671,25 @@ class CostPlanner:
     
     def cost_sort(self, node: QueryTree, input_cost: dict) -> dict:
         """
-        Cost untuk operasi SORT (ORDER BY).
-        Menggunakan External Merge Sort.
+        cost untuk operasi sort (order by).
+        menggunakan external merge sort.
         
-        Rumus: Cost ≈ 2 * b_r * (1 + ⌈log_{M-1}(b_r/M)⌉)
-        dimana:
-        - M = jumlah blocks yang fit di memory buffer
-        - b_r = jumlah blocks input
-        - Jika b_r ≤ M: sort in-memory, cost = b_r (satu pass)
+        rumus:
+            - in-memory (b_r ≤ m): cost = b_r
+            - external: cost = 2 * b_r * (1 + ⌈log_{m-1}(b_r/m)⌉)
+            - m = jumlah blocks di memory buffer
         
-        Penjelasan:
-        - 2 * b_r: setiap block dibaca dan ditulis di setiap pass
-        - ⌈log_{M-1}(b_r/M)⌉: jumlah merge passes
+        parameter:
+            node (QueryTree): node dengan type="SORT"
+            input_cost (dict): cost info dari child node
+        
+        return:
+            dict: {cost, n_r, b_r, f_r, v_a_r, sort_cost, operation, description}
+        
+        dipanggil oleh:
+            calculate_cost
+        
+        catatan: asumsi m = 100 blocks (harus diganti dengan config dari sm)
         """
         input_b_r = input_cost.get("b_r", 100)
         input_n_r = input_cost.get("n_r", 1000)
@@ -688,10 +726,22 @@ class CostPlanner:
     
     def cost_limit(self, node: QueryTree, input_cost: dict) -> dict:
         """
-        Cost untuk operasi LIMIT.
+        cost untuk operasi limit.
+        mendukung early termination.
         
-        Jika LIMIT sangat kecil, bisa early termination.
-        Cost reduction: cost * (limit / n_r)
+        rumus:
+            - output tuples: min(limit, n_r)
+            - cost reduction: cost * (limit / n_r)
+        
+        parameter:
+            node (QueryTree): node dengan type="LIMIT"
+            input_cost (dict): cost info dari child node
+        
+        return:
+            dict: {cost, n_r, b_r, f_r, v_a_r, operation, description}
+        
+        dipanggil oleh:
+            calculate_cost
         """
         # Handle different types for limit value
         if isinstance(node.val, int):
@@ -730,17 +780,23 @@ class CostPlanner:
     
     def cost_aggregation(self, node: QueryTree, input_cost: dict) -> dict:
         """
-        Cost untuk operasi AGGREGATION (GROUP BY, COUNT, SUM, AVG, etc).
+        cost untuk operasi aggregation (group by, count, sum, avg, dll).
+        menggunakan hash-based aggregation.
         
-        Rumus dari slide "Size Estimation for Other Operations":
-        - Aggregation: estimated size of _A G_F(r) = V(A,r)
-        - Untuk GROUP BY A: output tuples = V(A,r)
+        rumus:
+            - output size: v(a,r) untuk group by a
+            - cost: cost(input) + b_r (build hash table)
+            - v(a,r) untuk min/max: min(v(a,r), v(g,r))
         
-        Cost estimation:
-        - Hash-based: cost ≈ cost(input) + b_r (build hash table)
-        - Sort-based: cost ≈ cost(input) + sort_cost
+        parameter:
+            node (QueryTree): node dengan type="GROUP" atau "AGGREGATE"
+            input_cost (dict): cost info dari child node
         
-        Asumsi: menggunakan hash-based aggregation
+        return:
+            dict: {cost, n_r, b_r, f_r, v_a_r, agg_cost, operation, description}
+        
+        dipanggil oleh:
+            calculate_cost
         """
         input_n_r = input_cost.get("n_r", 1000)
         input_b_r = input_cost.get("b_r", 100)
@@ -787,18 +843,17 @@ class CostPlanner:
     
     def calculate_cost(self, node: QueryTree) -> dict:
         """
-        Recursively calculate cost untuk query tree.
-        Bottom-up approach: calculate children first, then parent.
+        menghitung cost untuk query tree secara rekursif.
+        bottom-up approach: hitung children dulu, lalu parent.
         
-        Args:
-            node: QueryTree node untuk dihitung costnya
+        parameter:
+            node (QueryTree): node untuk dihitung costnya
         
-        Returns:
-            dict: Cost breakdown dengan keys: operation, cost, n_r, b_r, f_r, v_a_r, description
+        return:
+            dict: {operation, cost, n_r, b_r, f_r, v_a_r, description}
         
-        Called by:
-            - get_cost()
-            - plan_query()
+        dipanggil oleh:
+            get_cost
         """
         if node.type == "TABLE":
             return self.cost_table_scan(node)
@@ -854,21 +909,22 @@ class CostPlanner:
             return {"cost": 0, "n_r": 0, "b_r": 0, "f_r": 1, "v_a_r": {}}
     
 
-    #================================= MAIN FUNCTION, PANGGIL INI ===============================================
     def get_cost(self, query: ParsedQuery) -> int:
         """
-        Fungsi utama untuk mendapatkan cost dari query.
+        fungsi utama untuk mendapatkan cost dari query.
         
-        Args:
-            query: ParsedQuery object dengan query_tree
+        parameter:
+            query (ParsedQuery): object dengan query_tree
         
-        Returns:
-            int: total cost (dalam unit block I/O)
+        return:
+            int: total cost (dalam unit block i/o)
         
-        Usage:
+        dipanggil oleh:
+            OptimizationEngine.get_cost (QueryOptimizer.py)
+        
+        usage:
             planner = CostPlanner()
             cost = planner.get_cost(parsed_query)
-            print(f"Query cost: {cost}")
         """
         if not query.query_tree:
             raise ValueError("No query tree available in ParsedQuery")
@@ -879,14 +935,17 @@ class CostPlanner:
     
     def plan_query(self, parsed_query: ParsedQuery) -> dict:
         """
-        Mendapatkan detailed cost breakdown dari query.
-        Untuk mendapatkan hanya cost integer, gunakan get_cost().
+        mendapatkan detailed cost breakdown dari query.
+        untuk cost integer saja, gunakan get_cost().
         
-        Args:
-            parsed_query: ParsedQuery object
+        parameter:
+            parsed_query (ParsedQuery): object dengan query_tree
         
-        Returns:
-            dict: cost plan dengan breakdown lengkap
+        return:
+            dict: {query, total_cost, estimated_records, blocks_read, details}
+        
+        dipanggil oleh:
+            user code (untuk debugging/analysis)
         """
         if not parsed_query.query_tree:
             return {
@@ -907,7 +966,16 @@ class CostPlanner:
     
     def print_cost_breakdown(self, cost_plan: dict):
         """
-        Pretty print cost breakdown.
+        print cost breakdown dengan format yang rapi.
+        
+        parameter:
+            cost_plan (dict): hasil dari plan_query()
+        
+        return:
+            none (print ke stdout)
+        
+        dipanggil oleh:
+            user code (untuk debugging)
         """
         print("=" * 60)
         print("QUERY COST PLAN")
@@ -923,7 +991,17 @@ class CostPlanner:
     
     def _print_details(self, details: dict, indent: int):
         """
-        Helper untuk print nested details.
+        helper untuk print nested details dengan indentasi.
+        
+        parameter:
+            details (dict): cost breakdown details
+            indent (int): level indentasi
+        
+        return:
+            none (print ke stdout)
+        
+        dipanggil oleh:
+            print_cost_breakdown (line ~912)
         """
         prefix = "  " * indent
         print(f"{prefix}Operation: {details.get('operation', 'Unknown')}")
