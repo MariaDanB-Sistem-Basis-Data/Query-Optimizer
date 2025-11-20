@@ -344,6 +344,23 @@ class OptimizationEngine:
         stats = get_stats()
         return plan_cost(root, stats)
     
+    def optimize_query_non_join(self, pq: ParsedQuery) -> ParsedQuery:
+        if not pq or not pq.query_tree:
+            return pq
+        
+        root = pq.query_tree
+        # nyobain aja max iterasi 5
+        max_iterations = 5
+        for _ in range(max_iterations):
+            old_root = root
+            
+            root = self._apply_non_join_rules(root)
+            
+            if root == old_root:
+                break
+        
+        return ParsedQuery(pq.query, root)
+
     def _apply_non_join_rules(self, node: QueryTree) -> QueryTree:
         if not node:
             return node
