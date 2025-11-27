@@ -1,13 +1,7 @@
 from model.parsed_query import ParsedQuery
 from model.query_tree import (
     QueryTree,
-    ConditionNode,
-    LogicalNode,
-    ColumnNode,
-    OrderByItem,
     SetClause,
-    ColumnDefinition,
-    ForeignKeyDefinition,
     TableReference,
     InsertData,
     CreateTableData,
@@ -52,7 +46,6 @@ from helper.helper import (
     parse_group_by_string,
     parse_insert_columns_string,
     parse_insert_values_string,
-    _parse_column_reference,
     _theta_pred
 )
 
@@ -144,7 +137,7 @@ class OptimizationEngine:
                     from_node = _parse_from_clause(q)
                     current_root = from_node
                 
-                parse_result.query_tree = current_root
+                parse_result.query_tree = current_root if current_root else from_node
           
             elif q.upper().startswith("UPDATE"):
                 current_root = None
