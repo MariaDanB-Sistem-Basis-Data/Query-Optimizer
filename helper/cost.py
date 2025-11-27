@@ -7,7 +7,7 @@ File ini tabel-tabelnya masih pakai dummy, jalankan python tests/UnitTestingCost
 - V(A,r): number of distinct values for attribute A in relation r
 """
 
-from model.query_tree import QueryTree, ConditionNode, LogicalNode, ColumnNode
+from model.query_tree import QueryTree, ConditionNode, LogicalNode, ColumnNode, ThetaJoin
 from model.parsed_query import ParsedQuery
 import math
 
@@ -72,11 +72,18 @@ class CostPlanner:
                 'l_r': 200,
                 'f_r': 10,
                 'v_a_r': {
-                    'student_id': 10000,  # primary key: semuanya unique
-                    'name': 9500,         # hampir unique
-                    'age': 50,            # range 18-67
-                    'gpa': 41,            # range 0.0-4.0 (dengan step 0.1)
-                    'major': 20           # 20 jurusan berbeda
+                    'student_id': 10000,  
+                    'name': 9500,         
+                    'age': 50,           
+                    'gpa': 41,            
+                    'major': 20           
+                },
+                'indexes': {
+                    'student_id': {'type': 'b+', 'value': 4}, # value di b+ itu kedalaman, kalau di hash itu jumlah bucket (m)
+                    'name': {'type': 'hash', 'value': 10},        
+                    'age': {'type': 'none', 'value': None},           
+                    'gpa': {'type': 'none', 'value': None},   
+                    'major': {'type': 'none', 'value': None}   
                 }
             },
             "courses": {
@@ -89,6 +96,12 @@ class CostPlanner:
                     'course_name': 500,   # unique
                     'credits': 4,         # 1,2,3,4 credits
                     'department': 15      # 15 departments
+                },
+                'indexes': {
+                    'course_id': {'type': 'b+', 'value': 3},  # primary key, depth = 3
+                    'course_name': {'type': 'none', 'value': None},
+                    'credits': {'type': 'none', 'value': None},
+                    'department': {'type': 'none', 'value': None}
                 }
             },
             "enrollments": {
@@ -102,6 +115,13 @@ class CostPlanner:
                     'course_id': 500,        # foreign key ke courses
                     'grade': 13,             # A+, A, A-, B+, B, B-, C+, C, C-, D, F, W, I
                     'semester': 20           # semester values
+                },
+                'indexes': {
+                    'enrollment_id': {'type': 'b+', 'value': 4},  # primary key, depth = 4
+                    'student_id': {'type': 'hash', 'value': 20},  # foreign key, hash buckets = 20
+                    'course_id': {'type': 'b+', 'value': 3},      # foreign key, depth = 3
+                    'grade': {'type': 'none', 'value': None},
+                    'semester': {'type': 'none', 'value': None}
                 }
             },
             "employees": {
@@ -114,6 +134,12 @@ class CostPlanner:
                     'name': 9500,
                     'dept_id': 50,
                     'salary': 500
+                },
+                'indexes': {
+                    'id': {'type': 'b+', 'value': 4},       # primary key
+                    'name': {'type': 'none', 'value': None},
+                    'dept_id': {'type': 'hash', 'value': 10},  # foreign key
+                    'salary': {'type': 'none', 'value': None}
                 }
             },
             "departments": {
@@ -125,6 +151,11 @@ class CostPlanner:
                     'id': 1000,
                     'name': 950,
                     'manager_id': 800
+                },
+                'indexes': {
+                    'id': {'type': 'b+', 'value': 3},  # primary key
+                    'name': {'type': 'none', 'value': None},
+                    'manager_id': {'type': 'none', 'value': None}
                 }
             },
             "orders": {
@@ -136,6 +167,11 @@ class CostPlanner:
                     'id': 75000,
                     'customer_id': 2000,
                     'status': 5
+                },
+                'indexes': {
+                    'id': {'type': 'b+', 'value': 4},  # primary key
+                    'customer_id': {'type': 'hash', 'value': 15},  # foreign key
+                    'status': {'type': 'none', 'value': None}
                 }
             },
             "customers": {
@@ -147,6 +183,11 @@ class CostPlanner:
                     'id': 24000,
                     'name': 23000,
                     'city': 200
+                },
+                'indexes': {
+                    'id': {'type': 'b+', 'value': 4},  # primary key
+                    'name': {'type': 'none', 'value': None},
+                    'city': {'type': 'none', 'value': None}
                 }
             },
             "products": {
@@ -158,6 +199,11 @@ class CostPlanner:
                     'id': 20000,
                     'name': 19000,
                     'category': 50
+                },
+                'indexes': {
+                    'id': {'type': 'b+', 'value': 4},  # primary key
+                    'name': {'type': 'none', 'value': None},
+                    'category': {'type': 'none', 'value': None}
                 }
             }
         }
@@ -168,7 +214,8 @@ class CostPlanner:
             'b_r': 500,
             'l_r': 80,
             'f_r': 10,
-            'v_a_r': {}
+            'v_a_r': {},
+            'indexes': {}
         }
         
         # Handle TableReference object - extract name
@@ -178,7 +225,87 @@ class CostPlanner:
         return dummy_stats.get(table_name.lower(), default_stats)
         # ==================== [AKHIR BAGIAN HAPUS] ====================
     
-    def store_temp_stats(self, table_id: str, n_r: int, b_r: int, f_r: int, v_a_r: dict):
+    def get_index_info(self, table_stats: dict, attribute: str) -> dict:
+        """
+        parameter:
+            table_stats (dict): statistik tabel dari get_table_stats()
+            attribute (str): nama attribute/column
+        
+        return:
+            dict: {'type': str, 'value': int/None} 
+        
+        dipanggil: cost_table_scan, cost_join
+        """
+        indexes = table_stats.get('indexes', {})
+        return indexes.get(attribute, {'type': 'none', 'value': None})
+    
+    
+    def extract_join_attributes(self, join_condition) -> tuple:
+        """
+        ekstrak attribute dari join condition (theta join).
+        
+        parameter:
+            join_condition: ConditionNode atau ThetaJoin dari node.val
+        
+        return:
+            tuple: ((left_table, left_attr), (right_table, right_attr)) 
+                   atau ((None, None), (None, None)) jika tidak bisa extract
+        
+        dipanggil: cost_join
+        """
+        # Handle ThetaJoin object
+        if hasattr(join_condition, 'condition'):
+            condition = join_condition.condition
+        elif isinstance(join_condition, ConditionNode):
+            condition = join_condition
+        else:
+            return ((None, None), (None, None))
+        
+        # Extract atribut
+        if not isinstance(condition, ConditionNode):
+            return ((None, None), (None, None))
+        
+        left_table = None
+        left_attr = None
+        right_table = None
+        right_attr = None
+        
+        # Extract left attribute
+        if isinstance(condition.attr, ColumnNode):
+            left_table = condition.attr.table
+            left_attr = condition.attr.column
+        elif isinstance(condition.attr, dict):
+            left_table = condition.attr.get('table')
+            left_attr = condition.attr.get('column')
+        elif isinstance(condition.attr, str):
+            # Format: "table.column" or just "column"
+            if '.' in condition.attr:
+                parts = condition.attr.split('.')
+                left_table = parts[0]
+                left_attr = parts[1]
+            else:
+                left_attr = condition.attr
+        
+        # Extract right attribute  
+        if isinstance(condition.value, ColumnNode):
+            right_table = condition.value.table
+            right_attr = condition.value.column
+        elif isinstance(condition.value, dict):
+            right_table = condition.value.get('table')
+            right_attr = condition.value.get('column')
+        elif isinstance(condition.value, str) and hasattr(condition.value, 'split'):
+            # Format: "table.column" or just "column"
+            if '.' in condition.value:
+                parts = condition.value.split('.')
+                right_table = parts[0]
+                right_attr = parts[1]
+            else:
+                right_attr = condition.value
+        
+        return ((left_table, left_attr), (right_table, right_attr))
+    
+
+    def store_temp_stats(self, table_id: str, n_r: int, b_r: int, f_r: int, v_a_r: dict, indexes: dict = None):
         """
         menyimpan statistik untuk temporary table (hasil join, selection, dll).
         
@@ -188,6 +315,7 @@ class CostPlanner:
             b_r (int): jumlah blocks
             f_r (int): blocking factor
             v_a_r (dict): distinct values per attribute
+            indexes (dict): index info (default none untuk temp tables)
         
         return:
             none
@@ -200,7 +328,8 @@ class CostPlanner:
             'b_r': b_r,
             'l_r': 0,  # ga perlu untuk temporary
             'f_r': f_r,
-            'v_a_r': v_a_r
+            'v_a_r': v_a_r,
+            'indexes': indexes if indexes else {}
         }
     
     # ======================= HELPER FUNCTIONS - DISPLAY/FORMATTING =======================
@@ -416,6 +545,7 @@ class CostPlanner:
             "b_r": stats['b_r'],
             "f_r": stats['f_r'],
             "v_a_r": stats['v_a_r'],
+            "indexes": stats.get('indexes', {}),
             "description": f"Full scan of table {display_name}"
         }
     
@@ -502,6 +632,7 @@ class CostPlanner:
             "b_r": output_b_r,
             "f_r": input_f_r,
             "v_a_r": output_v_a_r,
+            "indexes": {},  # selection result tidak ada index
             "selectivity": selectivity,
             "description": f"Filter: {condition_str} (selectivity={selectivity:.2f})"
         }
@@ -550,26 +681,32 @@ class CostPlanner:
             "b_r": output_b_r,
             "f_r": output_f_r,
             "v_a_r": output_v_a_r,
+            "indexes": {},  # projection result tidak ada index
             "description": f"Project columns: {columns}"
         }
     
     def cost_join(self, node: QueryTree, left_cost: dict, right_cost: dict) -> dict:
         """
         cost untuk operasi join (⋈ - bowtie).
-        menggunakan nested-loop join sebagai default.
+        support nested-loop join, index join (b+/hash), dan hash join.
         
         rumus nested-loop:
             cost = b_r(r) + n_r(r) * b_r(s)
         
+        rumus index join:
+            - b+ tree: cost = b_r(r) + n_r(r) * c
+              dimana c = kedalaman + 1
+            - hash: cost = b_r(r) + n_r(r) * c_bucket
+              dimana c_bucket = b_s / m (m = jumlah bucket)
+        
+        rumus hash join (kedua punya hash index):
+            cost = 3 * (b_r(r) + b_r(s))
+        
         rumus estimasi join size:
             - case 1 (no common): n_r(r ⋈ s) = n_r(r) * n_r(s)
             - case 2 (key): n_r(r ⋈ s) ≤ n_r(s)
-            - case 3 (foreign key): n_r(r ⋈ s) = n_r(s) Note: s adalah table dengan foreign key
+            - case 3 (foreign key): n_r(r ⋈ s) = n_r(s)
             - case 4 (not key): n_r(r ⋈ s) = (n_r(r) * n_r(s)) / max(v(a,r), v(a,s))
-        
-        rumus v(a, r ⋈ s):
-            - jika a dari r: v(a, r⋈s) = min(v(a,r), n_r(r⋈s))
-            - jika a dari r dan s: gunakan formula kombinasi
         
         parameter:
             node (QueryTree): node dengan type="JOIN"
@@ -577,31 +714,92 @@ class CostPlanner:
             right_cost (dict): cost info dari right child
         
         return:
-            dict: {cost, n_r, b_r, f_r, v_a_r, join_cost, operation, description}
+            dict: {cost, n_r, b_r, f_r, v_a_r, join_cost, join_method, operation, description}
         
         dipanggil oleh:
             calculate_cost
-        
-        todo: implementasi hash join dan sort-merge join
-              - hash join: 3 * (b_r(r) + b_r(s))
-              - sort-merge: b_r(r) + b_r(s) + sort_cost
         """
         left_n_r = left_cost.get("n_r", 1000)
         left_b_r = left_cost.get("b_r", 100)
         left_v_a_r = left_cost.get("v_a_r", {})
+        left_table = left_cost.get("table", None)
         
         right_n_r = right_cost.get("n_r", 1000)
         right_b_r = right_cost.get("b_r", 100)
         right_v_a_r = right_cost.get("v_a_r", {})
+        right_table = right_cost.get("table", None)
         
-        # === COST CALCULATION (Nested-Loop Join) ===
-        # Formula: Cost = b_r(R) + n_r(R) * b_r(S)
-        join_cost = left_b_r + (left_n_r * right_b_r)
+        # Extract join attributes dari condition
+        join_info = self.extract_join_attributes(node.val)
+        (left_join_table, left_attr), (right_join_table, right_attr) = join_info
+        
+        # Determine join method berdasarkan index availability
+        join_method = "nested-loop"
+        join_cost = 0
+        
+        # Check index availability untuk join attributes
+        left_index = None
+        right_index = None
+        
+        # Try get index from table stats
+        if left_attr:
+            # Use table from join condition if available, otherwise from cost dict
+            table_to_check = left_join_table if left_join_table else left_table
+            
+            if table_to_check:
+                # Direct table access
+                left_stats = self.get_table_stats(table_to_check)
+                left_index = self.get_index_info(left_stats, left_attr)
+            else:
+                # Intermediate result - check if index preserved in cost dict
+                left_indexes = left_cost.get("indexes", {})
+                if left_attr in left_indexes:
+                    left_index = left_indexes[left_attr]
+        
+        if right_attr:
+            # Use table from join condition if available, otherwise from cost dict
+            table_to_check = right_join_table if right_join_table else right_table
+            
+            if table_to_check:
+                # Direct table access
+                right_stats = self.get_table_stats(table_to_check)
+                right_index = self.get_index_info(right_stats, right_attr)
+            else:
+                # Intermediate result - check if index preserved in cost dict
+                right_indexes = right_cost.get("indexes", {})
+                if right_attr in right_indexes:
+                    right_index = right_indexes[right_attr]
+        
+        # ===  JOIN METHOD ===
+        #kanan kiri hash index → Hash Join
+        if (left_index and left_index.get('type') == 'hash' and 
+            right_index and right_index.get('type') == 'hash'):
+            join_method = "hash-join"
+            join_cost = 3 * (left_b_r + right_b_r)
+        
+        #kanan pake B+ index → Index Nested-Loop Join
+        elif right_index and right_index.get('type') == 'b+':
+            join_method = "index-nested-loop (b+)"
+            c = right_index.get('value', 3) + 1  # depth + 1
+            join_cost = left_b_r + (left_n_r * c)
+        
+        #kanan pake hash index → Index Nested-Loop Join (hash)
+        elif right_index and right_index.get('type') == 'hash':
+            join_method = "index-nested-loop (hash)"
+            m = right_index.get('value', 10)  # number of buckets
+            c_bucket = right_b_r / m if m > 0 else right_b_r
+            join_cost = left_b_r + (left_n_r * c_bucket)
+        
+        #No index → Nested-Loop Join
+        else:
+            join_method = "nested-loop"
+            join_cost = left_b_r + (left_n_r * right_b_r)
+        
         total_cost = left_cost.get("cost", 0) + right_cost.get("cost", 0) + join_cost
         
         # === SIZE ESTIMATION ===
         # Karena kita tidak tahu join attribute atau key info,
-        # gunakan Case 4: R ∩ S = {A} not a key
+        # gunakan R ∩ S = {A} not a key
         # Formula: n_r(R ⋈ S) = (n_r(R) * n_r(S)) / max(V(A,R), V(A,S))
         
         # Heuristic: asumsi ada common attribute dengan V(A,R) dan V(A,S)
@@ -653,20 +851,37 @@ class CostPlanner:
                 # Formula: V(A, r⋈s) = min(V(A,s), n_r⋈s)
                 output_v_a_r[attr] = min(v_val, output_n_r)
         
+        # Preserve indexes dari input tables ke join result
+        # Join result dapat menggunakan index dari table asalnya
+        output_indexes = {}
+        left_indexes = left_cost.get("indexes", {})
+        right_indexes = right_cost.get("indexes", {})
+        
+        # Merge indexes dari left dan right
+        for attr, idx_info in left_indexes.items():
+            if attr in output_v_a_r:  # only preserve if attribute exists in result
+                output_indexes[attr] = idx_info
+        
+        for attr, idx_info in right_indexes.items():
+            if attr in output_v_a_r and attr not in output_indexes:
+                output_indexes[attr] = idx_info
+        
         # Store temporary stats
         temp_id = f"join_{id(node)}"
-        self.store_temp_stats(temp_id, output_n_r, output_b_r, output_f_r, output_v_a_r)
+        self.store_temp_stats(temp_id, output_n_r, output_b_r, output_f_r, output_v_a_r, output_indexes)
         
         return {
             "operation": "JOIN",
             "join_type": node.val if node.val else "INNER",
+            "join_method": join_method,
             "cost": total_cost,
             "n_r": output_n_r,
             "b_r": output_b_r,
             "f_r": output_f_r,
             "v_a_r": output_v_a_r,
+            "indexes": output_indexes,  # preserve indexes untuk subsequent joins
             "join_cost": join_cost,
-            "description": f"Nested-Loop Join (cost={join_cost})"
+            "description": f"{join_method} join (cost={join_cost:.2f})"
         }
     
     def cost_sort(self, node: QueryTree, input_cost: dict) -> dict:
@@ -720,6 +935,7 @@ class CostPlanner:
             "b_r": input_cost.get("b_r", 100),
             "f_r": input_cost.get("f_r", 10),
             "v_a_r": input_cost.get("v_a_r", {}),
+            "indexes": input_cost.get("indexes", {}),  # preserve indexes dari input
             "sort_cost": sort_cost,
             "description": f"External Merge Sort (cost={sort_cost})"
         }
@@ -775,6 +991,7 @@ class CostPlanner:
             "b_r": output_b_r,
             "f_r": input_cost.get("f_r", 10),
             "v_a_r": input_cost.get("v_a_r", {}),
+            "indexes": input_cost.get("indexes", {}),  # preserve indexes dari input
             "description": f"Limit to {limit_val} records"
         }
     
@@ -835,6 +1052,7 @@ class CostPlanner:
             "b_r": output_b_r,
             "f_r": output_f_r,
             "v_a_r": output_v_a_r,
+            "indexes": {},  # aggregation result tidak ada index
             "agg_cost": agg_cost,
             "description": f"Aggregation: {node.val} (cost={agg_cost})"
         }
