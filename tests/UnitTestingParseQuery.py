@@ -45,10 +45,6 @@ def print_tree(node, indent=0, prefix="ROOT", is_last=True):
         is_last_child = (i == len(node.childs) - 1)
         print_tree(child, indent + 1, "", is_last_child)
 
-# ==========================================
-# HELPER FUNCTIONS FOR VISUALIZATION (UPDATED)
-# ==========================================
-
 def _format_val(val):
     if val is None:
         return "∅"
@@ -59,7 +55,6 @@ def _format_val(val):
     
     if isinstance(val, list):
         if len(val) == 0: return "[]"
-        # Format list item secara simple
         items = []
         for x in val:
             if isinstance(x, ColumnNode): items.append(str(x))
@@ -83,23 +78,19 @@ def _format_val(val):
     if isinstance(val, NaturalJoin): return "NATURAL"
     if isinstance(val, ThetaJoin): return f"ON {_format_condition(val.condition)}"
     
-    # Custom Objects Info
     if isinstance(val, InsertData): return f"INTO {val.table}"
     if isinstance(val, CreateTableData): return f"TABLE {val.table}"
     if isinstance(val, DropTableData): return f"TABLE {val.table} ({'CASCADE' if val.cascade else 'RESTRICT'})"
     
-    # HANDLING VISUAL SUBQUERY (Display Text)
     if isinstance(val, QueryTree):
-        return f" <Subquery: {val.type}>" # Penanda teks
+        return f" <Subquery: {val.type}>" 
     
     return str(val)
 
 def _format_attr(attr):
-    # Handle jika objek ColumnNode
     if isinstance(attr, ColumnNode): 
         return str(attr)
     
-    # Handle jika bentuknya Dictionary (ini yang terjadi di kodemu sekarang)
     if isinstance(attr, dict):
         col = attr.get('column')
         tbl = attr.get('table')
@@ -112,7 +103,6 @@ def _format_attr(attr):
 def _format_value(value):
     if isinstance(value, ColumnNode): return str(value)
     if isinstance(value, str): return f"'{value}'"
-    # Jangan return string panjang jika subquery, nanti digambar di details
     if isinstance(value, QueryTree): return "..." 
     return str(value)
 
@@ -124,7 +114,6 @@ def _format_condition(cond):
 def print_tree_box(node, prefix="", is_last=True, is_root=True):
     if node is None: return
 
-    # Gambar konektor untuk node ini
     if is_root:
         curr_prefix = ""
         child_prefix = ""
@@ -132,34 +121,26 @@ def print_tree_box(node, prefix="", is_last=True, is_root=True):
         curr_prefix = prefix + ("└── " if is_last else "├── ")
         child_prefix = prefix + ("    " if is_last else "│   ")
 
-    # Print Node Utama
     print(f"{curr_prefix}[{node.type}] {_format_val(node.val)}")
 
-    # --- LOGIKA BARU: Print Detail Subquery jika ada ---
-    # Cek apakah node ini memiliki Subquery di dalamnya (misal di SIGMA)
     if node.type == "SIGMA" and isinstance(node.val, ConditionNode):
         if isinstance(node.val.value, QueryTree):
-            # Kita gambar subquery seolah-olah dia anak tambahan (branch)
-            # Tentukan apakah SIGMA punya anak "asli" (Table) di bawahnya
+           
             has_real_children = len(node.childs) > 0
             
             sub_connector = "├── " if has_real_children else "└── "
             sub_prefix = child_prefix + ("│   " if has_real_children else "    ")
             
             print(f"{child_prefix}{sub_connector}(SUBQUERY DEFINITION):")
-            # Rekursif print subquery tree
             print_tree_box(node.val.value, sub_prefix, is_last=True, is_root=False)
 
-    # Print Detail lain (Insert/Create) - Sesuai kode lama
     _print_node_details(node, child_prefix, len(node.childs) == 0)
 
-    # Print Child Nodes Asli
     for i, child in enumerate(node.childs):
         is_last_child = (i == len(node.childs) - 1)
         print_tree_box(child, child_prefix, is_last_child, False)
 
 def _print_node_details(node, prefix, is_last_node):
-    # Create Table / Insert details logic (sama seperti sebelumnya)
     if node.type == "INSERT" and isinstance(node.val, InsertData):
         connector = "└── " if is_last_node else "├── "
         print(f"{prefix}{connector}Val: {node.val.values}")
@@ -281,9 +262,8 @@ def val_to_json(val):
             "cascade": val.cascade
         }
     
-    # --- HANDLING BARU SUBQUERY UNTUK JSON ---
     if isinstance(val, QueryTree):
-        return node_to_json(val) # Rekursif untuk print subquery sebagai JSON penuh
+        return node_to_json(val) 
     
     if isinstance(val, dict):
         return val
@@ -293,10 +273,6 @@ def val_to_json(val):
 def print_json(node, indent=2):
     json_data = node_to_json(node)
     print(json.dumps(json_data, indent=indent, ensure_ascii=False))
-
-# ==========================================
-# EXISTING TESTS
-# ==========================================
 
 def test_select_simple():
     engine = OptimizationEngine()
@@ -651,10 +627,6 @@ def test_mixed_and_or():
     
     print("\nPASSED\n")
 
-# ==========================================
-# NEW SUBQUERY TESTS
-# ==========================================
-
 def test_subquery_simple():
     engine = OptimizationEngine()
     print("=" * 50)
@@ -671,10 +643,8 @@ def test_subquery_simple():
         print("\nJSON Output:")
         print_json(result.query_tree)
         
-        # Validasi Subquery
         root = result.query_tree
         sigma = None
-        # Cari node SIGMA (traverse simple)
         def find_sigma(node):
             if node.type == "SIGMA": return node
             for child in node.childs:
@@ -686,7 +656,6 @@ def test_subquery_simple():
         
         assert sigma is not None, "SIGMA not found"
         assert isinstance(sigma.val, ConditionNode), "SIGMA val must be ConditionNode"
-        # Assert Value kanan adalah QueryTree
         assert isinstance(sigma.val.value, QueryTree), "Right Value must be QueryTree (Subquery)"
         
         print("\nPASSED\n")
@@ -710,10 +679,6 @@ def test_subquery_aggregate():
         print_tree_box(result.query_tree)
         print("\nJSON Output:")
         print_json(result.query_tree)
-        
-        # Validasi visual sudah cukup via JSON
-        # Pastikan struktur SIGMA->val->value adalah QueryTree
-        
         print("\nPASSED\n")
     except Exception as e:
         print(f"FAILED: {e}")
@@ -759,7 +724,6 @@ if __name__ == "__main__":
     test_drop_table()
     test_transaction()
     
-    # Run Subquery Tests
     test_subquery_simple()
     test_subquery_aggregate()
     test_subquery_nested()

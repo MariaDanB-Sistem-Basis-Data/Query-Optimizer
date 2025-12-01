@@ -160,7 +160,7 @@ class OptimizationEngine:
                 current_root = update_node
                 last_node = update_node
                 
-                # 2. parse WHERE (optional) -- MODIFIED FOR SUBQUERY
+                # 2. parse WHERE (optional) 
                 if "WHERE" in q.upper():
                     where_cond_str = _get_condition_from_where(q)
                     condition = parse_where_condition(where_cond_str, parse_query_callback=self.parse_query)
@@ -189,7 +189,7 @@ class OptimizationEngine:
                 current_root = delete_node
                 last_node = delete_node
                 
-                # 2. parse WHERE -- MODIFIED FOR SUBQUERY
+                # 2. parse WHERE 
                 if "WHERE" in q.upper():
                     where_cond_str = _get_condition_from_where(q)
                     condition = parse_where_condition(where_cond_str, parse_query_callback=self.parse_query)

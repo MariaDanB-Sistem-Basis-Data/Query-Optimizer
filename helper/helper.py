@@ -1339,27 +1339,19 @@ def parse_insert_values_string(values_str):
     return result
 
 def _split_ignoring_parens(text, delimiters):
-    """
-    Memecah string berdasarkan delimiter (AND/OR), tapi mengabaikan
-    delimiter yang berada di dalam tanda kurung (untuk subquery).
-    """
     tokens = []
     current = ""
     paren_depth = 0
-    
-    # Urutkan delimiter dari yang terpanjang agar match akurat
+
     delimiters = sorted(delimiters, key=len, reverse=True)
     
     i = 0
     while i < len(text):
         matched_delim = None
         
-        # Cek delimiter hanya jika kita tidak di dalam kurung
         if paren_depth == 0:
             for delim in delimiters:
-                # Cek apakah text di posisi i dimulai dengan delimiter
                 if text[i:].upper().startswith(delim):
-                    # Pastikan delimiter adalah kata utuh (followed by space, (, or end of string)
                     end_idx = i + len(delim)
                     if end_idx == len(text) or text[end_idx].isspace() or text[end_idx] == '(':
                         matched_delim = delim
@@ -1386,9 +1378,6 @@ def _split_ignoring_parens(text, delimiters):
     return tokens
 
 def _parse_operand_value(val_str, parse_query_callback=None):
-    """
-    Parse value sebelah kanan operator.
-    """
     val_str = val_str.strip()
     
     # 1. Cek Subquery
@@ -1399,8 +1388,6 @@ def _parse_operand_value(val_str, parse_query_callback=None):
             if parse_query_callback is None:
                 raise Exception("Subquery detected but no parser callback provided.")
             
-            # REKURSIF: Parse subquery
-            # PERBAIKAN DISINI: Tambahkan ";" agar lolos validasi parse_query
             subquery_str = inner_content if inner_content.endswith(';') else inner_content + ";"
             
             parsed_result = parse_query_callback(subquery_str)
@@ -1423,10 +1410,6 @@ def _parse_operand_value(val_str, parse_query_callback=None):
     return val_str
 
 def parse_where_condition(condition_str, parse_query_callback=None):
-    """
-    Parsing string WHERE menjadi tree LogicalNode / ConditionNode.
-    Support Subquery via parse_query_callback.
-    """
     condition_str = condition_str.strip()
     
     # 1. Split OR (Prioritas terendah, jadi root paling atas)
@@ -1442,12 +1425,6 @@ def parse_where_condition(condition_str, parse_query_callback=None):
         operands = [p for p in and_parts if p.upper() != "AND"]
         childs = [parse_where_condition(op, parse_query_callback) for op in operands]
         return LogicalNode("AND", childs)
-
-    # 3. Base Case: Single Condition
-    # Pattern: SisiKiri Operator SisiKanan
-    # Operator: =, <>, >=, <=, >, <
-    # Gunakan regex untuk memisahkan, tapi hati-hati dengan string di dalamnya
-    # Kita asumsikan format sederhana: col op val
     
     match = re.match(r"(.+?)\s*(<>|>=|<=|=|>|<)\s*(.+)", condition_str)
     if match:
@@ -1455,20 +1432,15 @@ def parse_where_condition(condition_str, parse_query_callback=None):
         op = match.group(2).strip()
         right_str = match.group(3).strip()
         
-        # Parse Sisi Kiri (Kolom)
-        # parse_columns_from_string harus sudah ada di helper.py kamu
-        # Jika belum di-import di helper, pastikan di bagian atas sudah ada
         col_nodes = parse_columns_from_string(left_str)
-        left_node = col_nodes[0] # Ambil yang pertama
+        left_node = col_nodes[0]
         
         attr_dict = {'column': left_node.column, 'table': left_node.table}
 
-        # Parse Sisi Kanan (Value atau Subquery)
         right_val = _parse_operand_value(right_str, parse_query_callback)
 
         return ConditionNode(attr_dict, op, right_val)
     
-    # Handle kasus kurung di sekeliling kondisi tunggal: (a=1)
     if condition_str.startswith('(') and condition_str.endswith(')'):
         return parse_where_condition(condition_str[1:-1], parse_query_callback)
 
