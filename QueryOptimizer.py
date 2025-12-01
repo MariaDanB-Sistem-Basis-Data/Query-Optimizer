@@ -116,10 +116,11 @@ class OptimizationEngine:
                         current_root = group
                     last_node = group
                 
-                # 5. parse WHERE (SIGMA)
+                # 5. parse WHERE (SIGMA) -- MODIFIED FOR SUBQUERY
                 if "WHERE" in q.upper():
                     where_cond_str = _get_condition_from_where(q)
-                    condition = parse_where_condition(where_cond_str)
+                    # Pass self.parse_query as callback for recursion
+                    condition = parse_where_condition(where_cond_str, parse_query_callback=self.parse_query)
                     
                     sigma = QueryTree(type="SIGMA", val=condition)
                     
@@ -159,10 +160,10 @@ class OptimizationEngine:
                 current_root = update_node
                 last_node = update_node
                 
-                # 2. parse WHERE (optional)
+                # 2. parse WHERE (optional) -- MODIFIED FOR SUBQUERY
                 if "WHERE" in q.upper():
                     where_cond_str = _get_condition_from_where(q)
-                    condition = parse_where_condition(where_cond_str)
+                    condition = parse_where_condition(where_cond_str, parse_query_callback=self.parse_query)
                     
                     sigma = QueryTree(type="SIGMA", val=condition)
                     
@@ -188,10 +189,10 @@ class OptimizationEngine:
                 current_root = delete_node
                 last_node = delete_node
                 
-                # 2. parse WHERE
+                # 2. parse WHERE -- MODIFIED FOR SUBQUERY
                 if "WHERE" in q.upper():
                     where_cond_str = _get_condition_from_where(q)
-                    condition = parse_where_condition(where_cond_str)
+                    condition = parse_where_condition(where_cond_str, parse_query_callback=self.parse_query)
                     
                     sigma = QueryTree(type="SIGMA", val=condition)
                     

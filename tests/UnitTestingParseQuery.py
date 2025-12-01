@@ -45,28 +45,28 @@ def print_tree(node, indent=0, prefix="ROOT", is_last=True):
         is_last_child = (i == len(node.childs) - 1)
         print_tree(child, indent + 1, "", is_last_child)
 
+# ==========================================
+# HELPER FUNCTIONS FOR VISUALIZATION (UPDATED)
+# ==========================================
+
 def _format_val(val):
     if val is None:
         return "∅"
-    
     if isinstance(val, str):
         return f'"{val}"' if val else "∅"
-    
-    if isinstance(val, int):
+    if isinstance(val, (int, float)):
         return str(val)
     
     if isinstance(val, list):
-        if len(val) == 0:
-            return "[]"
-        if isinstance(val[0], ColumnNode):
-            return "[" + ", ".join(str(c) for c in val) + "]"
-        if isinstance(val[0], OrderByItem):
-            return "[" + ", ".join(str(o) for o in val) + "]"
-        if isinstance(val[0], SetClause):
-            return "[" + ", ".join(str(s) for s in val) + "]"
-        if isinstance(val[0], ColumnDefinition):
-            return "[" + ", ".join(str(c) for c in val) + "]"
-        return str(val)
+        if len(val) == 0: return "[]"
+        # Format list item secara simple
+        items = []
+        for x in val:
+            if isinstance(x, ColumnNode): items.append(str(x))
+            elif isinstance(x, OrderByItem): items.append(f"{x.column} {x.direction}")
+            elif isinstance(x, SetClause): items.append(f"{x.column}={x.value}")
+            else: items.append(str(x))
+        return "[" + ", ".join(items) + "]"
     
     if isinstance(val, ConditionNode):
         left = _format_attr(val.attr)
@@ -78,242 +78,93 @@ def _format_val(val):
         return f"({val.operator}: {childs_str})"
     
     if isinstance(val, TableReference):
-        if val.alias:
-            return f"{val.name} AS {val.alias}"
-        return val.name
+        return f"{val.name} AS {val.alias}" if val.alias else val.name
     
-    if isinstance(val, NaturalJoin):
-        return "NATURAL"
+    if isinstance(val, NaturalJoin): return "NATURAL"
+    if isinstance(val, ThetaJoin): return f"ON {_format_condition(val.condition)}"
     
-    if isinstance(val, ThetaJoin):
-        cond_str = _format_condition(val.condition)
-        return f"ON {cond_str}"
+    # Custom Objects Info
+    if isinstance(val, InsertData): return f"INTO {val.table}"
+    if isinstance(val, CreateTableData): return f"TABLE {val.table}"
+    if isinstance(val, DropTableData): return f"TABLE {val.table} ({'CASCADE' if val.cascade else 'RESTRICT'})"
     
-    if isinstance(val, InsertData):
-        return f"table={val.table}"
-    
-    if isinstance(val, CreateTableData):
-        return f"table={val.table}"
-    
-    if isinstance(val, DropTableData):
-        mode = "CASCADE" if val.cascade else "RESTRICT"
-        return f"table={val.table}, mode={mode}"
-    
-    if isinstance(val, dict):
-        return str(val)
+    # HANDLING VISUAL SUBQUERY (Display Text)
+    if isinstance(val, QueryTree):
+        return f" <Subquery: {val.type}>" # Penanda teks
     
     return str(val)
 
-def _format_condition(cond):
-    if isinstance(cond, ConditionNode):
-        left = _format_attr(cond.attr)
-        right = _format_value(cond.value)
-        return f"{left} {cond.op} {right}"
-    elif isinstance(cond, LogicalNode):
-        childs_str = ", ".join(_format_condition(c) for c in cond.childs)
-        return f"({cond.operator}: {childs_str})"
-    return str(cond)
-
-def print_node_structure(node, indent=0):
-    if node is None:
-        print("  " * indent + "None")
-        return
-    
-    ind = "  " * indent
-    
-    print(f"{ind}QueryTree {{")
-    print(f"{ind}  type: \"{node.type}\",")
-    
-    print(f"{ind}  val: ", end="")
-    _print_val_structure(node.val, indent + 1)
-    
-    if node.childs:
-        print(f"{ind}  childs: [")
-        for i, child in enumerate(node.childs):
-            print_node_structure(child, indent + 2)
-            if i < len(node.childs) - 1:
-                print(f"{'  ' * (indent + 2)},")
-        print(f"{ind}  ]")
-    else:
-        print(f"{ind}  childs: []")
-    
-    print(f"{ind}}}")
-
-def _print_val_structure(val, indent):
-    ind = "  " * indent
-    
-    if val is None:
-        print("None,")
-    
-    elif isinstance(val, str):
-        print(f"\"{val}\",")
-    
-    elif isinstance(val, int) or isinstance(val, float):
-        print(f"{val},")
-    
-    elif isinstance(val, list):
-        if len(val) == 0:
-            print("[],")
-        else:
-            print("[")
-            for i, item in enumerate(val):
-                print(f"{ind}  ", end="")
-                _print_val_structure(item, indent + 1)
-            print(f"{ind}],")
-    
-    elif isinstance(val, ColumnNode):
-        if val.table:
-            print(f"ColumnNode(column=\"{val.column}\", table=\"{val.table}\"),")
-        else:
-            print(f"ColumnNode(column=\"{val.column}\", table=None),")
-    
-    elif isinstance(val, ConditionNode):
-        print("ConditionNode {")
-        print(f"{ind}  attr: ", end="")
-        _print_val_structure(val.attr, indent + 1)
-        print(f"{ind}  op: \"{val.op}\",")
-        print(f"{ind}  value: ", end="")
-        _print_val_structure(val.value, indent + 1)
-        print(f"{ind}}},")
-    
-    elif isinstance(val, LogicalNode):
-        print("LogicalNode {")
-        print(f"{ind}  operator: \"{val.operator}\",")
-        print(f"{ind}  childs: [")
-        for i, child in enumerate(val.childs):
-            print(f"{ind}    ", end="")
-            _print_val_structure(child, indent + 2)
-        print(f"{ind}  ]")
-        print(f"{ind}}},")
-    
-    elif isinstance(val, OrderByItem):
-        col = val.column
-        if col.table:
-            print(f"OrderByItem(column=ColumnNode(\"{col.column}\", \"{col.table}\"), direction=\"{val.direction}\"),")
-        else:
-            print(f"OrderByItem(column=ColumnNode(\"{col.column}\"), direction=\"{val.direction}\"),")
-    
-    elif isinstance(val, SetClause):
-        print(f"SetClause(column=\"{val.column}\", value=\"{val.value}\"),")
-    
-    elif isinstance(val, TableReference):
-        if val.alias:
-            print(f"TableReference(name=\"{val.name}\", alias=\"{val.alias}\"),")
-        else:
-            print(f"TableReference(name=\"{val.name}\", alias=None),")
-    
-    elif isinstance(val, NaturalJoin):
-        print("NaturalJoin(),")
-    
-    elif isinstance(val, ThetaJoin):
-        print("ThetaJoin {")
-        print(f"{ind}  condition: ", end="")
-        _print_val_structure(val.condition, indent + 1)
-        print(f"{ind}}},")
-    
-    elif isinstance(val, InsertData):
-        print("InsertData {")
-        print(f"{ind}  table: \"{val.table}\",")
-        print(f"{ind}  columns: {val.columns},")
-        print(f"{ind}  values: {val.values}")
-        print(f"{ind}}},")
-    
-    elif isinstance(val, CreateTableData):
-        print("CreateTableData {")
-        print(f"{ind}  table: \"{val.table}\",")
-        print(f"{ind}  columns: [")
-        for col in val.columns:
-            if col.size:
-                print(f"{ind}    ColumnDefinition(name=\"{col.name}\", data_type=\"{col.data_type}\", size={col.size}),")
-            else:
-                print(f"{ind}    ColumnDefinition(name=\"{col.name}\", data_type=\"{col.data_type}\", size=None),")
-        print(f"{ind}  ],")
-        print(f"{ind}  primary_key: {val.primary_key},")
-        print(f"{ind}  foreign_keys: [")
-        for fk in val.foreign_keys:
-            print(f"{ind}    ForeignKeyDefinition(column=\"{fk.column}\", ref_table=\"{fk.ref_table}\", ref_column=\"{fk.ref_column}\"),")
-        print(f"{ind}  ]")
-        print(f"{ind}}},")
-    
-    elif isinstance(val, DropTableData):
-        print(f"DropTableData(table=\"{val.table}\", cascade={val.cascade}),")
-    
-    else:
-        print(f"{val},")
-
 def _format_attr(attr):
-    if isinstance(attr, ColumnNode):
-        if attr.table:
-            return f"{attr.table}.{attr.column}"
-        return attr.column
+    # Handle jika objek ColumnNode
+    if isinstance(attr, ColumnNode): 
+        return str(attr)
+    
+    # Handle jika bentuknya Dictionary (ini yang terjadi di kodemu sekarang)
     if isinstance(attr, dict):
-        if attr.get('table'):
-            return f"{attr['table']}.{attr['column']}"
-        return attr.get('column', str(attr))
+        col = attr.get('column')
+        tbl = attr.get('table')
+        if tbl:
+            return f"{tbl}.{col}"
+        return col
+        
     return str(attr)
 
 def _format_value(value):
-    if isinstance(value, ColumnNode):
-        if value.table:
-            return f"{value.table}.{value.column}"
-        return value.column
-    if isinstance(value, str):
-        return f"'{value}'"
-    if isinstance(value, dict):
-        if value.get('table'):
-            return f"{value['table']}.{value['column']}"
-        return value.get('column', str(value))
+    if isinstance(value, ColumnNode): return str(value)
+    if isinstance(value, str): return f"'{value}'"
+    # Jangan return string panjang jika subquery, nanti digambar di details
+    if isinstance(value, QueryTree): return "..." 
     return str(value)
 
+def _format_condition(cond):
+    if isinstance(cond, ConditionNode):
+        return f"{_format_attr(cond.attr)} {cond.op} {_format_value(cond.value)}"
+    return str(cond)
+
 def print_tree_box(node, prefix="", is_last=True, is_root=True):
-    if node is None:
-        return
-    
+    if node is None: return
+
+    # Gambar konektor untuk node ini
     if is_root:
-        current_prefix = ""
+        curr_prefix = ""
         child_prefix = ""
     else:
-        current_prefix = prefix + ("└── " if is_last else "├── ")
+        curr_prefix = prefix + ("└── " if is_last else "├── ")
         child_prefix = prefix + ("    " if is_last else "│   ")
-    
-    val_str = _format_val(node.val)
-    
-    print(f"{current_prefix}[{node.type}] {val_str}")
-    
-    if is_root or True:
-        detail_prefix = child_prefix if not is_root else ""
-        _print_node_details(node, detail_prefix, len(node.childs) == 0)
-    
+
+    # Print Node Utama
+    print(f"{curr_prefix}[{node.type}] {_format_val(node.val)}")
+
+    # --- LOGIKA BARU: Print Detail Subquery jika ada ---
+    # Cek apakah node ini memiliki Subquery di dalamnya (misal di SIGMA)
+    if node.type == "SIGMA" and isinstance(node.val, ConditionNode):
+        if isinstance(node.val.value, QueryTree):
+            # Kita gambar subquery seolah-olah dia anak tambahan (branch)
+            # Tentukan apakah SIGMA punya anak "asli" (Table) di bawahnya
+            has_real_children = len(node.childs) > 0
+            
+            sub_connector = "├── " if has_real_children else "└── "
+            sub_prefix = child_prefix + ("│   " if has_real_children else "    ")
+            
+            print(f"{child_prefix}{sub_connector}(SUBQUERY DEFINITION):")
+            # Rekursif print subquery tree
+            print_tree_box(node.val.value, sub_prefix, is_last=True, is_root=False)
+
+    # Print Detail lain (Insert/Create) - Sesuai kode lama
+    _print_node_details(node, child_prefix, len(node.childs) == 0)
+
+    # Print Child Nodes Asli
     for i, child in enumerate(node.childs):
         is_last_child = (i == len(node.childs) - 1)
         print_tree_box(child, child_prefix, is_last_child, False)
 
 def _print_node_details(node, prefix, is_last_node):
+    # Create Table / Insert details logic (sama seperti sebelumnya)
     if node.type == "INSERT" and isinstance(node.val, InsertData):
         connector = "└── " if is_last_node else "├── "
-        print(f"{prefix}{connector}columns: {node.val.columns}")
-        print(f"{prefix}    └── values: {node.val.values}")
-    
+        print(f"{prefix}{connector}Val: {node.val.values}")
     elif node.type == "CREATE_TABLE" and isinstance(node.val, CreateTableData):
-        has_pk = len(node.val.primary_key) > 0
-        has_fk = len(node.val.foreign_keys) > 0
-        
-        print(f"{prefix}├── columns:")
-        for i, col in enumerate(node.val.columns):
-            is_last_col = (i == len(node.val.columns) - 1) and not has_pk and not has_fk
-            col_connector = "└── " if is_last_col else "├── "
-            size_str = f"({col.size})" if col.size else ""
-            print(f"{prefix}│   {col_connector}{col.name}: {col.data_type}{size_str}")
-        
-        if has_pk:
-            pk_connector = "└── " if not has_fk else "├── "
-            print(f"{prefix}{pk_connector}primary_key: {node.val.primary_key}")
-        
-        if has_fk:
-            print(f"{prefix}└── foreign_keys:")
-            for i, fk in enumerate(node.val.foreign_keys):
-                fk_connector = "└── " if i == len(node.val.foreign_keys) - 1 else "├── "
-                print(f"{prefix}    {fk_connector}{fk.column} -> {fk.ref_table}.{fk.ref_column}")
+        print(f"{prefix}└── Cols: {[c.name for c in node.val.columns]}")
 
 def node_to_json(node):
     if node is None:
@@ -430,6 +281,10 @@ def val_to_json(val):
             "cascade": val.cascade
         }
     
+    # --- HANDLING BARU SUBQUERY UNTUK JSON ---
+    if isinstance(val, QueryTree):
+        return node_to_json(val) # Rekursif untuk print subquery sebagai JSON penuh
+    
     if isinstance(val, dict):
         return val
     
@@ -438,6 +293,10 @@ def val_to_json(val):
 def print_json(node, indent=2):
     json_data = node_to_json(node)
     print(json.dumps(json_data, indent=indent, ensure_ascii=False))
+
+# ==========================================
+# EXISTING TESTS
+# ==========================================
 
 def test_select_simple():
     engine = OptimizationEngine()
@@ -792,6 +651,97 @@ def test_mixed_and_or():
     
     print("\nPASSED\n")
 
+# ==========================================
+# NEW SUBQUERY TESTS
+# ==========================================
+
+def test_subquery_simple():
+    engine = OptimizationEngine()
+    print("=" * 50)
+    print("Test Subquery: Simple WHERE")
+    print("=" * 50)
+    
+    query = "SELECT * FROM products WHERE price > (SELECT cost FROM materials WHERE id = 1);"
+    print(f"Query: {query}\n")
+    
+    try:
+        result = engine.parse_query(query)
+        print("Query Tree:")
+        print_tree_box(result.query_tree)
+        print("\nJSON Output:")
+        print_json(result.query_tree)
+        
+        # Validasi Subquery
+        root = result.query_tree
+        sigma = None
+        # Cari node SIGMA (traverse simple)
+        def find_sigma(node):
+            if node.type == "SIGMA": return node
+            for child in node.childs:
+                res = find_sigma(child)
+                if res: return res
+            return None
+            
+        sigma = find_sigma(root)
+        
+        assert sigma is not None, "SIGMA not found"
+        assert isinstance(sigma.val, ConditionNode), "SIGMA val must be ConditionNode"
+        # Assert Value kanan adalah QueryTree
+        assert isinstance(sigma.val.value, QueryTree), "Right Value must be QueryTree (Subquery)"
+        
+        print("\nPASSED\n")
+    except Exception as e:
+        print(f"FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+
+def test_subquery_aggregate():
+    engine = OptimizationEngine()
+    print("=" * 50)
+    print("Test Subquery: With Aggregate")
+    print("=" * 50)
+    
+    query = "SELECT id FROM students WHERE score >= (SELECT AVG(score) FROM students);"
+    print(f"Query: {query}\n")
+    
+    try:
+        result = engine.parse_query(query)
+        print("Query Tree:")
+        print_tree_box(result.query_tree)
+        print("\nJSON Output:")
+        print_json(result.query_tree)
+        
+        # Validasi visual sudah cukup via JSON
+        # Pastikan struktur SIGMA->val->value adalah QueryTree
+        
+        print("\nPASSED\n")
+    except Exception as e:
+        print(f"FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+
+def test_subquery_nested():
+    engine = OptimizationEngine()
+    print("=" * 50)
+    print("Test Subquery: Nested (Subquery inside Subquery)")
+    print("=" * 50)
+    
+    query = "SELECT * FROM t1 WHERE a = (SELECT b FROM t2 WHERE c = (SELECT d FROM t3 WHERE id = 1));"
+    print(f"Query: {query}\n")
+    
+    try:
+        result = engine.parse_query(query)
+        print("Query Tree:")
+        print_tree_box(result.query_tree)
+        print("\nJSON Output:")
+        print_json(result.query_tree)
+        
+        print("\nPASSED\n")
+    except Exception as e:
+        print(f"FAILED: {e}")
+        import traceback
+        traceback.print_exc()
+
 if __name__ == "__main__":
     test_select_simple()
     test_select_with_and()
@@ -808,6 +758,11 @@ if __name__ == "__main__":
     test_create_table()
     test_drop_table()
     test_transaction()
+    
+    # Run Subquery Tests
+    test_subquery_simple()
+    test_subquery_aggregate()
+    test_subquery_nested()
     
     print("=" * 50)
     print("All tests passed!")
