@@ -57,12 +57,20 @@ def print_cost_tree(cost_info, indent=0):
 
 
 def main():
+    # query = """
+    # SELECT * 
+    # FROM students 
+    # JOIN enrollments ON students.student_id = enrollments.student_id 
+    # JOIN courses ON courses.course_id = enrollments.course_id 
+    # WHERE students.student_id = 1 AND students.major = 'CS';
+    # """
+
     query = """
     SELECT * 
-    FROM students 
-    JOIN enrollments ON students.student_id = enrollments.student_id 
-    JOIN courses ON courses.course_id = enrollments.course_id 
-    WHERE students.student_id = 1 AND students.major = 'CS';
+    FROM students s
+    JOIN enrollments e ON s.student_id = e.student_id 
+    JOIN courses c ON c.course_id = e.course_id 
+    WHERE s.student_id = 1 AND s.major = 'CS';
     """
     
     print("=" * 80)

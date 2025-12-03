@@ -24,6 +24,10 @@ class CostPlanner:
         # Key: identifier string, Value: dict dengan n_r, b_r, f_r, v_a_r
         self.temp_table_stats = {}
         
+        # Mapping alias ke table name (diisi saat build query tree)
+        # Key: alias, Value: table_name
+        self.alias_map = {}
+        
     # =================== HELPER FUNCTIONS STATISTIK ===================
     
     def get_table_stats(self, table_name: str) -> dict:
@@ -218,9 +222,17 @@ class CostPlanner:
             'indexes': {}
         }
         
-        # Handle TableReference object - extract name
+        # Handle TableReference object - extract name and alias
         if hasattr(table_name, 'name'):
-            table_name = table_name.name
+            actual_name = table_name.name
+            # Store alias mapping if alias exists
+            if hasattr(table_name, 'alias') and table_name.alias:
+                self.alias_map[table_name.alias] = actual_name
+            table_name = actual_name
+        elif isinstance(table_name, str):
+            # Check if this is an alias
+            if table_name in self.alias_map:
+                table_name = self.alias_map[table_name]
         
         return dummy_stats.get(table_name.lower(), default_stats)
         # ==================== [AKHIR BAGIAN HAPUS] ====================
@@ -747,6 +759,10 @@ class CostPlanner:
             table_to_check = left_join_table if left_join_table else left_table
             
             if table_to_check:
+                # Resolve alias jika ada
+                if table_to_check in self.alias_map:
+                    table_to_check = self.alias_map[table_to_check]
+                
                 # Direct table access
                 left_stats = self.get_table_stats(table_to_check)
                 left_index = self.get_index_info(left_stats, left_attr)
@@ -761,6 +777,10 @@ class CostPlanner:
             table_to_check = right_join_table if right_join_table else right_table
             
             if table_to_check:
+                # Resolve alias jika ada
+                if table_to_check in self.alias_map:
+                    table_to_check = self.alias_map[table_to_check]
+                
                 # Direct table access
                 right_stats = self.get_table_stats(table_to_check)
                 right_index = self.get_index_info(right_stats, right_attr)
