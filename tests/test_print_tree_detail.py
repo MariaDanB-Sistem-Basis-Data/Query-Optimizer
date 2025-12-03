@@ -2,6 +2,10 @@
 Run test tree -> python -m tests.test_print_tree_detail
 """
 
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from QueryOptimizer import OptimizationEngine
 from model.query_tree import (
     QueryTree, LogicalNode, ConditionNode, ColumnNode, 

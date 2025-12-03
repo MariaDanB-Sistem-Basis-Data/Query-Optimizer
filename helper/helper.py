@@ -952,8 +952,8 @@ def _parse_from_clause(query: str) -> QueryTree:
     else:
         return _parse_table_with_alias(from_tables.strip())
 
-# parse table string dengan optional alias dan return TABLE node
 def _parse_table_with_alias(table_str: str) -> QueryTree:
+    # cek apakah ada keyword AS
     if " AS " in table_str.upper():
         parts = re.split(r'\s+AS\s+', table_str, flags=re.IGNORECASE)
         table_name = parts[0].strip()
@@ -961,9 +961,22 @@ def _parse_table_with_alias(table_str: str) -> QueryTree:
         table_ref = TableReference(table_name, alias)
         return QueryTree(type="TABLE", val=table_ref)
     else:
-        table_ref = TableReference(table_str)
-        return QueryTree(type="TABLE", val=table_ref)
-
+        # cek apakah ada spasi (kemungkinan alias tanpa AS)
+        parts = table_str.strip().split()
+        if len(parts) == 2:
+            # Format: table_name alias
+            table_name = parts[0].strip()
+            alias = parts[1].strip()
+            table_ref = TableReference(table_name, alias)
+            return QueryTree(type="TABLE", val=table_ref)
+        elif len(parts) == 1:
+            # hanya nama tabel tanpa alias
+            table_ref = TableReference(table_str.strip())
+            return QueryTree(type="TABLE", val=table_ref)
+        else:
+            # default (hanya nama tabel)
+            table_ref = TableReference(parts[0].strip())
+            return QueryTree(type="TABLE", val=table_ref)
 # helper untuk extract SET conditions dari UPDATE
 def _extract_set_conditions(query: str) -> list:
     q_upper = query.upper()
@@ -1342,18 +1355,35 @@ def _split_ignoring_parens(text, delimiters):
     tokens = []
     current = ""
     paren_depth = 0
+    in_string = False
+    quote_char = None
 
     delimiters = sorted(delimiters, key=len, reverse=True)
     
     i = 0
     while i < len(text):
-        matched_delim = None
+        char = text[i]
         
-        if paren_depth == 0:
+        # Handle string literals
+        if char in ["'", '"'] and (i == 0 or text[i-1] != '\\'):
+            if not in_string:
+                in_string = True
+                quote_char = char
+            elif char == quote_char:
+                in_string = False
+                quote_char = None
+            current += char
+            i += 1
+            continue
+        
+        matched_delim = None
+        if paren_depth == 0 and not in_string:
             for delim in delimiters:
                 if text[i:].upper().startswith(delim):
                     end_idx = i + len(delim)
-                    if end_idx == len(text) or text[end_idx].isspace() or text[end_idx] == '(':
+                    before_ok = (i == 0 or text[i-1].isspace() or text[i-1] == '(')
+                    after_ok = (end_idx == len(text) or text[end_idx].isspace() or text[end_idx] == '(')
+                    if before_ok and after_ok:
                         matched_delim = delim
                         break
             
@@ -1364,7 +1394,6 @@ def _split_ignoring_parens(text, delimiters):
             current = ""
             i += len(matched_delim)
         else:
-            char = text[i]
             if char == '(':
                 paren_depth += 1
             elif char == ')':
