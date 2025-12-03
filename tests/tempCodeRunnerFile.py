@@ -1,0 +1,1 @@
+JOIN courses c ON c.course_id = e.course_id 

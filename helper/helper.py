@@ -952,8 +952,8 @@ def _parse_from_clause(query: str) -> QueryTree:
     else:
         return _parse_table_with_alias(from_tables.strip())
 
-# parse table string dengan optional alias dan return TABLE node
 def _parse_table_with_alias(table_str: str) -> QueryTree:
+    # Coba cek apakah ada keyword AS
     if " AS " in table_str.upper():
         parts = re.split(r'\s+AS\s+', table_str, flags=re.IGNORECASE)
         table_name = parts[0].strip()
@@ -961,8 +961,22 @@ def _parse_table_with_alias(table_str: str) -> QueryTree:
         table_ref = TableReference(table_name, alias)
         return QueryTree(type="TABLE", val=table_ref)
     else:
-        table_ref = TableReference(table_str)
-        return QueryTree(type="TABLE", val=table_ref)
+        # Cek apakah ada spasi (kemungkinan alias tanpa AS)
+        parts = table_str.strip().split()
+        if len(parts) == 2:
+            # Format: table_name alias
+            table_name = parts[0].strip()
+            alias = parts[1].strip()
+            table_ref = TableReference(table_name, alias)
+            return QueryTree(type="TABLE", val=table_ref)
+        elif len(parts) == 1:
+            # Hanya nama tabel tanpa alias
+            table_ref = TableReference(table_str.strip())
+            return QueryTree(type="TABLE", val=table_ref)
+        else:
+            # Kasus lain, gunakan default (hanya nama tabel)
+            table_ref = TableReference(parts[0].strip())
+            return QueryTree(type="TABLE", val=table_ref)
 
 # helper untuk extract SET conditions dari UPDATE
 def _extract_set_conditions(query: str) -> list:
